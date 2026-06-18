@@ -106,7 +106,7 @@ class ChannelOptions:
 @dataclass(init=False)
 class ChannelSpec:
     locator: EntityLocator
-    opts: ChannelOptions = ChannelOptions()
+    opts: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
 
     def __init__(self, info: dict, defaultOpts: ChannelOptions):
         self.locator = EntityLocator(info)
@@ -116,7 +116,7 @@ class ChannelSpec:
 @dataclass(init=False)
 class GroupChannelSpec:
     locator: Union[Id, FrozenSet[EntityLocator]]
-    opts: ChannelOptions = ChannelOptions()
+    opts: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
 
     def __init__(self, info: dict, defaultOpts: ChannelOptions):
         groupLocator = info['group']
@@ -136,10 +136,10 @@ class TeamSpec:
     locator: EntityLocator
     miscPrivateChannels: bool = True
     explicitPrivateChannels: List[ChannelSpec] = dataclassfield(default_factory=list)
-    privateChannelDefaults: ChannelOptions = ChannelOptions()
+    privateChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
     miscPublicChannels: bool = True
     explicitPublicChannels: List[ChannelSpec] = dataclassfield(default_factory=list)
-    publicChannelDefaults: ChannelOptions = ChannelOptions()
+    publicChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
 
     @staticmethod
     def fromConfig(info: dict, globalPrivateDefaults: ChannelOptions, globalPublicDefaults: ChannelOptions) -> 'TeamSpec':
@@ -195,18 +195,19 @@ class ConfigFile:
     explicitUsers: List[ChannelSpec] = dataclassfield(default_factory=list)
     miscGroupChannels: bool = True
     explicitGroups: List[GroupChannelSpec] = dataclassfield(default_factory=list)
-    channelDefaults: ChannelOptions = ChannelOptions()
-    directChannelDefaults: ChannelOptions = ChannelOptions()
-    groupChannelDefaults: ChannelOptions = ChannelOptions()
-    privateChannelDefaults: ChannelOptions = ChannelOptions()
-    publicChannelDefaults: ChannelOptions = ChannelOptions()
+    channelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
+    directChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
+    groupChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
+    privateChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
+    publicChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
 
     outputDirectory: Path = Path()
     verboseHumanFriendlyPosts: bool = False
     downloadAllEmojis: bool = False
 
     verbosity: LogVerbosity = LogVerbosity.Normal
-    reportProgress: ProgressSettings = ProgressSettings(mode=progress.VisualizationMode.AnsiEscapes)
+    reportProgress: ProgressSettings = dataclassfield(
+        default_factory=lambda: ProgressSettings(mode=progress.VisualizationMode.AnsiEscapes))
     progressInterval: int = 500
 
     @staticmethod

@@ -71,6 +71,10 @@ class Time:
         return self._time
     def __eq__(self, other: 'Time'):
         return self._time == other._time
+    # Defining __eq__ makes instances unhashable; Python 3.11+ then rejects
+    # Time() used as a dataclass field default (see store.py). Hash by value.
+    def __hash__(self):
+        return hash(self._time)
     def __lt__(self, other: 'Time'):
         return self._time < other._time
     # Needed to silence linter

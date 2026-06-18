@@ -15,6 +15,12 @@ class RecoveryAction:
     def __eq__(self, other: 'RecoveryAction') -> bool:
         return type(self) == type(other)
 
+    # Defining __eq__ makes instances unhashable by default, which Python 3.11+
+    # rejects when such an instance is used as a dataclass field default
+    # (see config.py). Equal objects share a type, so hash by type.
+    def __hash__(self) -> int:
+        return hash(type(self))
+
 class RSkipDownload(RecoveryAction):
     '''
         Download is not performed.
