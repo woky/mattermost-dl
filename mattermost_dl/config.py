@@ -191,6 +191,7 @@ class ConfigFile:
     throttlingLoopDelay: int = 0
     throttlingLoopDelayJitter: float = 0.5
     throttlingPageSize: int = 60
+    throttlingRequestTimeout: float = 60.0
     miscTeams: bool = True
     explicitTeams: List[TeamSpec] = dataclassfield(default_factory=list)
     miscDirectChannels: bool = True
@@ -296,6 +297,8 @@ class ConfigFile:
                 self.throttlingLoopDelayJitter = min(1.0, max(0.0, throttling['loopDelayJitter']))
             if 'pageSize' in throttling:
                 self.throttlingPageSize = min(200, max(1, throttling['pageSize']))
+            if 'requestTimeout' in throttling:
+                self.throttlingRequestTimeout = throttling['requestTimeout']
         if 'output' in config:
             output = config['output']
             if 'directory' in output:

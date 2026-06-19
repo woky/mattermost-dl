@@ -379,6 +379,11 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200
+        },
+        "requestTimeout": {
+          "description": "Per-request read timeout in seconds; a stalled connection aborts and is retried instead of hanging forever. Default 60.",
+          "type": "number",
+          "minimum": 1
         }
       }
     },

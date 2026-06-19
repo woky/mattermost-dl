@@ -29,6 +29,7 @@ class MattermostDriver:
     HTTP_MAX_RETRIES = 5
     HTTP_RETRY_BASE_DELAY = 1.0   # seconds; doubled each attempt
     HTTP_RETRY_MAX_DELAY = 60.0   # cap on a single wait
+    HTTP_CONNECT_TIMEOUT = 15.0   # seconds to establish a connection
 
     def __init__(self, config: ConfigFile):
         self.configfile: ConfigFile = config
@@ -85,7 +86,9 @@ class MattermostDriver:
             backoff = min(self.HTTP_RETRY_MAX_DELAY,
                           self.HTTP_RETRY_BASE_DELAY * 2 ** attempt)
             try:
-                r = self.session.get(url, headers=headers, params=params)
+                r = self.session.get(url, headers=headers, params=params,
+                                      timeout=(self.HTTP_CONNECT_TIMEOUT,
+                                               self.configfile.throttlingRequestTimeout))
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.Timeout,
                     requests.exceptions.ChunkedEncodingError) as e:
