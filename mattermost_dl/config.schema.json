@@ -367,6 +367,18 @@
           "description": "Delay between bulk requests in ms.",
           "type": "integer",
           "minimum": 0
+        },
+        "loopDelayJitter": {
+          "description": "Randomizes each loopDelay wait by +/- this fraction (0..1) so request timing is not perfectly periodic. Default 0.5.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "pageSize": {
+          "description": "Number of posts/items fetched per request (Mattermost max 200). Larger means fewer requests. Default 60.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
         }
       }
     },

@@ -189,6 +189,8 @@ class ConfigFile:
     token: str = ''
 
     throttlingLoopDelay: int = 0
+    throttlingLoopDelayJitter: float = 0.5
+    throttlingPageSize: int = 60
     miscTeams: bool = True
     explicitTeams: List[TeamSpec] = dataclassfield(default_factory=list)
     miscDirectChannels: bool = True
@@ -287,7 +289,13 @@ class ConfigFile:
                 self.token = connection['token']
 
         if 'throttling' in config:
-            self.throttlingLoopDelay = config['throttling']['loopDelay']
+            throttling = config['throttling']
+            if 'loopDelay' in throttling:
+                self.throttlingLoopDelay = throttling['loopDelay']
+            if 'loopDelayJitter' in throttling:
+                self.throttlingLoopDelayJitter = min(1.0, max(0.0, throttling['loopDelayJitter']))
+            if 'pageSize' in throttling:
+                self.throttlingPageSize = min(200, max(1, throttling['pageSize']))
         if 'output' in config:
             output = config['output']
             if 'directory' in output:

@@ -8,8 +8,11 @@ from .bo import *
 from .config import ConfigFile, OrderDirection
 
 import json
+import random
 import requests
 from time import sleep
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 @dataclass
 class Cache:
@@ -19,6 +22,13 @@ class Cache:
 
 class MattermostDriver:
     API_PART = '/api/v4/'
+
+    # Resilience against transient network failures (dropped connections,
+    # read timeouts) during long bulk downloads: retry with exponential backoff
+    # instead of aborting the whole run.
+    HTTP_MAX_RETRIES = 5
+    HTTP_RETRY_BASE_DELAY = 1.0   # seconds; doubled each attempt
+    HTTP_RETRY_MAX_DELAY = 60.0   # cap on a single wait
 
     def __init__(self, config: ConfigFile):
         self.configfile: ConfigFile = config
@@ -47,8 +57,17 @@ class MattermostDriver:
         raise AssertionError # Never
 
     def delay(self):
-        logging.debug(f"Waiting for {self.configfile.throttlingLoopDelay/1000}s ...")
-        sleep(self.configfile.throttlingLoopDelay/1000)
+        base = self.configfile.throttlingLoopDelay / 1000
+        if base <= 0:
+            return
+        # Randomize around the configured delay so the request cadence isn't
+        # perfectly periodic -- a steady machine-like pattern is both an easy
+        # automation fingerprint and a constant load. Mean stays ~= base.
+        # jitter is clamped to [0, 1] at config load, so the low bound is >= 0.
+        jitter = self.configfile.throttlingLoopDelayJitter
+        wait = random.uniform(base * (1 - jitter), base * (1 + jitter))
+        logging.debug(f"Throttle: waiting {wait:.3f}s ...")
+        sleep(wait)
 
     def getRaw(self, apiCommand: str, params: dict = {}) -> requests.Response:
         '''
@@ -58,10 +77,58 @@ class MattermostDriver:
         headers = {}
         if self.authorizationToken:
             headers.update({'Authorization': 'Bearer '+self.authorizationToken})
-        r = self.session.get(self.configfile.hostname + self.API_PART + apiCommand, headers=headers, params=params)
+        url = self.configfile.hostname + self.API_PART + apiCommand
+        # Resilience: retry transient network failures with exponential backoff,
+        # and honor server-side rate limiting (HTTP 429 + Retry-After) instead of
+        # aborting. Other bad HTTP statuses are handled by onBadHttpResponse.
+        for attempt in range(self.HTTP_MAX_RETRIES + 1):
+            backoff = min(self.HTTP_RETRY_MAX_DELAY,
+                          self.HTTP_RETRY_BASE_DELAY * 2 ** attempt)
+            try:
+                r = self.session.get(url, headers=headers, params=params)
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                if attempt == self.HTTP_MAX_RETRIES:
+                    logging.error(f"Request '{apiCommand}' failed after "
+                                  f"{attempt + 1} attempts: {e}")
+                    raise
+                logging.warning(f"Request '{apiCommand}' hit a transient network "
+                                f"error ({e}); retrying in {backoff:.0f}s "
+                                f"(attempt {attempt + 1}/{self.HTTP_MAX_RETRIES}).")
+                sleep(backoff)
+                continue
+            # Server is telling us to slow down: wait as instructed and retry.
+            if r.status_code == 429 and attempt < self.HTTP_MAX_RETRIES:
+                wait = self._retryAfterSeconds(r, default=backoff)
+                logging.warning(f"Request '{apiCommand}' was rate limited (429); "
+                                f"waiting {wait:.0f}s before retry "
+                                f"(attempt {attempt + 1}/{self.HTTP_MAX_RETRIES}).")
+                sleep(wait)
+                continue
+            break
         if r.status_code != 200:
             self.onBadHttpResponse(apiCommand, r)
         return r
+
+    @staticmethod
+    def _retryAfterSeconds(response: requests.Response, default: float) -> float:
+        '''
+            How long to wait per a 429 response's Retry-After header, accepting
+            either delta-seconds or an HTTP-date. Falls back to `default`.
+        '''
+        value = response.headers.get('Retry-After')
+        if not value:
+            return default
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(value)
+            return max(0.0, (when - datetime.now(when.tzinfo)).total_seconds())
+        except (TypeError, ValueError):
+            return default
 
     def get(self, apiCommand: str, params: dict = {}) -> Union[dict, list]:
         '''
@@ -260,7 +327,7 @@ class MattermostDriver:
             channel: Optional[Channel] = None, *,
             beforePost: Optional[Id] = None, afterPost: Optional[Id] = None,
             beforeTime: Optional[Time] = None, afterTime: Optional[Time] = None,
-            bufferSize: int = 60, maxCount: int = 0, offset: int = 0,
+            bufferSize: int = 0, maxCount: int = 0, offset: int = 0,
             timeDirection: OrderDirection = OrderDirection.Asc,
             onSkippedPost: Callable[[], None] = (lambda: None)
             ) -> 'MattermostDriver.ProcessPostResult':
@@ -287,6 +354,8 @@ class MattermostDriver:
                     - skip until afterTime filter matches, then start processing
                     - continue collecting until end, maxCount or beforeTime is reached
         '''
+        if not bufferSize:
+            bufferSize = self.configfile.throttlingPageSize
         if channel:
             channelId = channel.id
         else:
@@ -411,8 +480,7 @@ class MattermostDriver:
                 del params['page']
             if pageOffset != 0:
                 pageOffset = 0
-            if self.configfile.throttlingLoopDelay:
-                sleep(self.configfile.throttlingLoopDelay / 1000) # Dump rate limit avoidance
+            self.delay()  # jittered throttle between page fetches
 
     def getPosts(self, channel: Channel = None, *args, **kwargs) -> List[Post]:
         result = []
@@ -421,7 +489,9 @@ class MattermostDriver:
         self.processPosts(channel=channel, processor=process, *args, **kwargs)
         return result
 
-    def processEmojiList(self, processor: Callable[[Emoji], None], bufferSize: int = 60, maxCount: int = 0):
+    def processEmojiList(self, processor: Callable[[Emoji], None], bufferSize: int = 0, maxCount: int = 0):
+        if not bufferSize:
+            bufferSize = self.configfile.throttlingPageSize
         params = {
             'per_page': bufferSize
         }
