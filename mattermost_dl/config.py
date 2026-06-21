@@ -32,10 +32,6 @@ class ConfigurationError(Exception):
         super().__init__(*args)
         self.filename = filename
 
-class OrderDirection(Enum):
-    Asc = 0
-    Desc = 1
-
 @dataclass
 class ChannelOptions:
     postsAfterId: Optional[Id] = None
@@ -46,7 +42,6 @@ class ChannelOptions:
     postSessionLimit: int = -1 # 0 is allowed and fetches only channel metadata
     onExistingCompatibleArchive: Union[RBackup, RDelete, RReuse, RSkipDownload] = RReuse()
     onExistingIncompatibleArchive: Union[RBackup, RDelete, RSkipDownload] = RBackup()
-    downloadTimeDirection: OrderDirection = OrderDirection.Asc
     downloadAttachments: bool = False
     downloadAttachmentTypes: List[str] = dataclassfield(default_factory=list)
     downloadAttachmentSizeLimit: int = 0 # 0 means no limit
@@ -86,9 +81,6 @@ class ChannelOptions:
                 'skip': RSkipDownload(),
             }.get(x, self.onExistingIncompatibleArchive)
 
-        x = info.get('downloadFromOldest', None)
-        if x is not None:
-            self.downloadTimeDirection = OrderDirection.Asc if x else OrderDirection.Desc
         if 'attachments' in info:
             attachments = info['attachments']
             self.downloadAttachments = attachments.get('download', self.downloadAttachments)
@@ -190,7 +182,7 @@ class ConfigFile:
 
     throttlingLoopDelay: int = 0
     throttlingLoopDelayJitter: float = 0.5
-    throttlingPageSize: int = 60
+    throttlingPageSize: int = 200
     throttlingRequestTimeout: float = 60.0
     miscTeams: bool = True
     explicitTeams: List[TeamSpec] = dataclassfield(default_factory=list)

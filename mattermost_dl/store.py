@@ -6,13 +6,18 @@
         - contains json equivalent of ChannelHeader
     channelname.data.json
         - contains newline separated sequence of compact json serializations of Post
-        - posts are ordered by timestamp and should be continous (precise ordering is specified in header)
+        - posts are always ordered oldest->newest by timestamp and are continuous
+          (no posts missing within the covered interval)
+    channelname.data.json.tmp
+        - transient download buffer holding posts newest->oldest as they are fetched
+        - on completion it is reversed and appended into channelname.data.json, then deleted
+        - its presence means a prior download was interrupted and can be resumed
 '''
 
 from .common import *
 
 from .bo import *
-from .config import ChannelOptions, OrderDirection
+from .config import ChannelOptions
 from .driver import MattermostDriver
 from .jsonvalidation import validate as validateJson, formatValidationErrors
 from . import jsonvalidation
@@ -20,44 +25,149 @@ from . import jsonvalidation
 from collections.abc import Iterable
 import json
 import jsonschema
-from os import stat_result
 # HACK: Pyright linter doesn't recognize special meaning of ClassVar from .common in dataclasses
 from typing import ClassVar
 
 
-class PostOrdering(Enum):
+def _iterLinesBackward(f: BinaryIO, size: int, chunkSize: int = 65536
+        ) -> Generator[Tuple[bytes, int], None, None]:
     '''
-        Describes how posts are organized in the storage
+        Yields `(lineBytes, startOffset)` for each newline-terminated line in the
+        byte range `[0, size)` of `f`, newest (last) line first. `lineBytes`
+        excludes the terminating newline; `startOffset` is the line's first byte.
+
+        A trailing partial line (bytes after the final newline, e.g. left by a
+        crash mid-write) is skipped. The file is read backward in bounded chunks,
+        so only the lines actually consumed are held in memory.
     '''
+    pos = size
+    buf = b''  # always equals f[pos : pos + len(buf)]
+    sawTerminator = False  # have we passed the final newline (and dropped any partial)?
+    while pos > 0:
+        readSize = min(chunkSize, pos)
+        pos -= readSize
+        f.seek(pos)
+        buf = f.read(readSize) + buf
+        while True:
+            nl = buf.rfind(b'\n')
+            if nl == -1:
+                break
+            segment = buf[nl + 1:]
+            segStart = pos + nl + 1
+            buf = buf[:nl]
+            if not sawTerminator:
+                # Bytes after the very last newline are an incomplete trailing line.
+                sawTerminator = True
+                continue
+            if segment:
+                yield segment, segStart
+    if buf and sawTerminator:
+        # Leftover is the first line in the file (no preceding newline).
+        yield buf, 0
 
-    Unsorted = 0  # May even have duplicates
-    Ascending = 1  # Sorted from oldest to newest
-    Descending = 2  # Sorted from newest to oldest
-    AscendingContinuous = 3  # Sorted from oldest to newest, no posts missing in interval
-    DescendingContinuous = 4  # Sorted from newest to oldest, no posts missing in interval
 
-    @classmethod
-    def fromStore(cls, info: str) -> 'PostOrdering':
-        for member in cls:
-            if info == member.name:
-                return member
-        else:
-            logging.warning(
-                f"Unknown channel ordering type '{info}', assumed unsorted.")
-            return PostOrdering.Unsorted
+def iterPostsBackward(filename: Path) -> Generator[bytes, None, None]:
+    '''
+        Yields the raw stored post lines (without trailing newline) of a
+        newline-delimited post file in reverse file order.
 
-    def toStore(self) -> str:
-        return self.name
+        For a newest->oldest buffer this yields posts oldest->newest, the order
+        in which they are appended into the oldest->newest data file on commit.
+    '''
+    with open(filename, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return
+        for line, _ in _iterLinesBackward(f, size):
+            yield line
+
+
+def trimDataFileNewerThan(filename: Path, boundaryTime: Time) -> None:
+    '''
+        Crash-safety reconcile for the oldest->newest data file.
+
+        Removes from the end of `filename` every complete line whose createTime is
+        `>= boundaryTime`, plus any trailing partial line. Used before re-committing
+        a resumed download buffer: every buffered post is strictly newer than the
+        committed archive, so trimming the tail down to `boundaryTime` (the buffer's
+        oldest post) undoes a partial or complete prior append, making the re-commit
+        append each buffered post exactly once.
+    '''
+    if not filename.is_file():
+        return
+    with open(filename, 'r+b') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return
+        keepLen = 0
+        for line, startOffset in _iterLinesBackward(f, size):
+            try:
+                createTime = json.loads(line)['createTime']
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue  # unparseable tail line -> drop it too
+            if createTime < boundaryTime.timestamp:
+                keepLen = startOffset + len(line) + 1
+                break
+        if keepLen < size:
+            f.truncate(keepLen)
+
+
+def countStoredPosts(filename: Path) -> int:
+    '''
+        Number of complete (newline-terminated) post lines in a stored post file.
+        A trailing partial line (no newline) is not counted. Cheap: counts newline
+        bytes without parsing.
+    '''
+    if not filename.is_file():
+        return 0
+    count = 0
+    with open(filename, 'rb') as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            count += chunk.count(b'\n')
+    return count
+
+
+def readLastStoredPost(filename: Path) -> Optional[Tuple[Id, Time, int]]:
+    '''
+        Reads the last complete post line of a newline-delimited post file.
+
+        Returns `(postId, createTime, validByteLength)` or `None` if there is no
+        complete post (missing/empty file or only a truncated partial line).
+        `validByteLength` is the file length up to and including the terminating
+        newline of that last complete post; any bytes beyond it are an incomplete
+        write that can be trimmed.
+    '''
+    if not filename.is_file():
+        return None
+    with open(filename, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return None
+        for line, startOffset in _iterLinesBackward(f, size):
+            try:
+                info = json.loads(line)
+                return Id(info['id']), Time(info['createTime']), startOffset + len(line) + 1
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return None
+    return None
+
 
 @dataclass
 class PostStorage(JsonMessage):
     '''
-        Note that if count == 0, other fields do not have to hold meaningful values.
+        Posts are always stored oldest->newest and continuous (no gaps in the
+        covered time interval). Note that if count == 0, other fields do not have
+        to hold meaningful values.
     '''
 
     # Number of posts
     count: int = 0
-    organization: PostOrdering = PostOrdering.Unsorted
     byteSize: int = 0
     # If the first post is not completely first, here is post that we known to be before it (respecting ordering)
     postIdBeforeFirst: Optional[Id] = None
@@ -76,31 +186,30 @@ class PostStorage(JsonMessage):
             Constructs fresh, partially initialized storage suitable
             for incremental filling by `addSortedPost`, followed
             by correcting the byteSize.
+
+            Storage is always oldest->newest and continuous: downloads run
+            newest->oldest into a transient buffer and are reversed into the data
+            file on commit, where this storage is built in ascending order.
         '''
         storage = PostStorage(misc={})
-        if options.downloadTimeDirection == OrderDirection.Asc:
-            storage.organization = PostOrdering.AscendingContinuous
-
-            if options.postsAfterTime is not None:
-                storage.beginTime = options.postsAfterTime
-        else:
-            assert options.downloadTimeDirection == OrderDirection.Desc
-            storage.organization = PostOrdering.DescendingContinuous
-
-            if options.postsBeforeTime is not None:
-                storage.beginTime = options.postsBeforeTime
+        if options.postsAfterTime is not None:
+            storage.beginTime = options.postsAfterTime
         return storage
 
 
-    def addSortedPost(self, p: Post, postOrderHints: MattermostDriver.PostHints, ordering: OrderDirection):
+    def addSortedPost(self, p: Post, postOrderHints: MattermostDriver.PostHints):
+        '''
+            Records one post into the storage metadata. Posts must be fed in
+            ascending (oldest->newest) order, as produced by the commit pass.
+        '''
         if self.count == 0:
             self.firstPostId = p.id
             if self.beginTime == Time(0):
                 self.beginTime = p.createTime
-            self.postIdBeforeFirst = postOrderHints.postIdBefore if ordering == OrderDirection.Asc else postOrderHints.postIdAfter
+            self.postIdBeforeFirst = postOrderHints.postIdBefore
         self.lastPostId = p.id
         self.endTime = p.createTime
-        self.postIdAfterLast = postOrderHints.postIdAfter if ordering == OrderDirection.Asc else postOrderHints.postIdBefore
+        self.postIdAfterLast = postOrderHints.postIdAfter
 
         self.count += 1
 
@@ -110,7 +219,6 @@ class PostStorage(JsonMessage):
             Updates old post storage with freshly downloaded content.
             Does not represent concatenation of arbitrary storages.
         '''
-        assert other.organization == self.organization
         if other.count > 0:
             assert self.lastPostId == other.postIdBeforeFirst
             self.count += other.count
@@ -213,33 +321,3 @@ class ChannelHeader:
             return jsonschema.Draft7Validator(json.load(schemaFile))
 
 ChannelHeader._schemaValidator = ChannelHeader.loadSchemaValidator()
-
-@dataclass
-class ChannelFileInfo:
-    '''
-        Represents information about stored channel archive.
-
-        Contains file stats for header and data (posts containg) file, useful mainly for
-        checking that files weren't modified since they were read from.
-    '''
-    header: ChannelHeader
-    headerFileStats: stat_result
-    dataFileStats: Optional[stat_result] = None
-
-    @classmethod
-    def load(cls, channel: Channel, headerFilename: Path, dataFilename: Path) -> Optional['ChannelFileInfo']:
-        '''
-            Attempts to load channel header, without validation of the posts storage.
-        '''
-        if not headerFilename.is_file():
-            return None
-
-        headerStat = headerFilename.stat()
-        dataStat = dataFilename.stat() if dataFilename.is_file() else None
-
-        with open(headerFilename, 'r', encoding='utf8') as headerFile:
-            try:
-                return ChannelFileInfo(ChannelHeader.fromStore(json.load(headerFile)), headerStat, dataStat)
-            except Exception:
-                logging.warning(exceptionFormatter(f"Unable to load existing metadata for channel '{channel.internalName}'."))
-                return None

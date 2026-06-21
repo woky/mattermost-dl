@@ -65,8 +65,7 @@ emoji.download = false
 
 [[teams.privateChannels]]
 name = "Fiorina 161"
-# Fetch 10 latest posts
-downloadFromOldest = false
+# Fetch 10 latest posts (download runs newest->oldest, so a cap keeps the newest)
 maximumPostCount = 10
 
 [[teams.privateChannels]]

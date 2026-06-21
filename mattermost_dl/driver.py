@@ -5,7 +5,7 @@
 
 from .common import *
 from .bo import *
-from .config import ConfigFile, OrderDirection
+from .config import ConfigFile
 
 import json
 import random
@@ -325,37 +325,24 @@ class MattermostDriver:
         MaxCountReached = enumerator()
         ConditionReached = enumerator()
 
-    # REFACTORME: this function could be simplified, possibly separate downloading from filtering by additional callbacks
     def processPosts(self, processor: Callable[[Post, 'MattermostDriver.PostHints'], None],
             channel: Optional[Channel] = None, *,
             beforePost: Optional[Id] = None, afterPost: Optional[Id] = None,
             beforeTime: Optional[Time] = None, afterTime: Optional[Time] = None,
             bufferSize: int = 0, maxCount: int = 0, offset: int = 0,
-            timeDirection: OrderDirection = OrderDirection.Asc,
             onSkippedPost: Callable[[], None] = (lambda: None)
             ) -> 'MattermostDriver.ProcessPostResult':
         '''
             Main function to load all channel's posts.
             Loading happens lazily in batches, each post is passed to external callable.
 
-            Processing order works according to following logic:
-                - add afterPost/beforePost filters. They work serverside and will limit the fetched output
-                - in descending order
-                    - apply offset
-                    - start reading pages, after first page set beforePost to earliest post and read page 0
-                        - skip until beforeTime filter matches, then start processing
-                        - continue collecting until end, maxCount or afterTime is reached
-                - in ascending order
-                    - if afterPost filter exist
-                        - apply offset
-                    - else
-                        - set page according to total message count so that the final page would be shown
-                        - if the fetched page isn't, in fact, final (due to total message count being approximate),
-                            continue into history
-                        - subtract offset
-                    - start reading pages, after first page set afterPost to latest post and read page 0
-                    - skip until afterTime filter matches, then start processing
-                    - continue collecting until end, maxCount or beforeTime is reached
+            Download always runs newest->oldest, the Mattermost-native direction:
+                - add afterPost/beforePost filters; they work serverside and limit the fetched output
+                - apply offset
+                - start reading pages, after the first page set the `before` cursor to the
+                  earliest fetched post and keep paging back
+                    - skip posts newer than beforeTime, then start processing
+                    - continue collecting until the channel start, maxCount, afterPost or afterTime is reached
         '''
         if not bufferSize:
             bufferSize = self.configfile.throttlingPageSize
@@ -373,38 +360,16 @@ class MattermostDriver:
         if beforePost:
             params.update(before=beforePost)
 
-        if afterTime and beforeTime and afterTime < beforeTime:
+        # The processed window is [afterTime, beforeTime): posts with create_at
+        # >= afterTime (lower stop) and < beforeTime (upper skip). It is empty only
+        # when afterTime >= beforeTime, in which case short-circuit instead of
+        # paging through the whole channel skipping everything.
+        if afterTime and beforeTime and afterTime >= beforeTime:
             return self.ProcessPostResult.NothingRequested
-        # Note that messageCount may be inaccurate
-        # if offset >= channel.messageCount:
-        #     return self.ProcessPostResult.NoMorePosts
 
-        page: int = 0
+        page: int = offset // bufferSize
         # How many messages on page shall be ignored (in the download direction)
-        pageOffset: int = 0
-        if timeDirection == OrderDirection.Desc or afterPost:
-            page = offset // bufferSize
-            pageOffset = offset % bufferSize
-        else:
-            absoluteMessageOffset = channel.messageCount
-            page = max(0, channel.messageCount // bufferSize - int(channel.messageCount % bufferSize == 0))
-            while True:
-                postWindow = self.get(f'channels/{channelId}/posts', {'per_page': bufferSize, 'page': page})
-                assert isinstance(postWindow, dict)
-
-                # We're touching last page, yet there's more posts -> not truly last page
-                if postWindow['prev_post_id'] != '':
-                    page += 1
-                    continue
-                break
-
-            absoluteMessageOffset = page * bufferSize + len(postWindow['order']) - offset
-            page = max(0, absoluteMessageOffset // bufferSize - int(absoluteMessageOffset % bufferSize == 0))
-            if offset > channel.messageCount % bufferSize:
-                pageOffset = bufferSize - absoluteMessageOffset % bufferSize
-            else:
-                pageOffset = offset
-            assert pageOffset < bufferSize # Sanity check
+        pageOffset: int = offset % bufferSize
 
         postHints = self.PostHints()
         while True:
@@ -415,68 +380,35 @@ class MattermostDriver:
 
             stopReason: Optional[MattermostDriver.ProcessPostResult] = None
 
-            if timeDirection == OrderDirection.Desc:
-                for windowIndex, postId in enumerate(postWindow['order'][pageOffset:]):
-                    p = postWindow['posts'][postId]
-                    postHints.postIdBefore = postWindow['order'][windowIndex + 1] if windowIndex + 1 < len(postWindow['order']) else postWindow['prev_post_id'] if postWindow['prev_post_id'] != '' else None
-                    postHints.postIdAfter = postWindow['order'][windowIndex - 1] if windowIndex - 1 >= 0 else postWindow['next_post_id'] if postWindow['next_post_id'] != '' else None
-                    if ((afterPost and p['id'] == afterPost)
-                        or (afterTime and p['create_at'] < afterTime.timestamp)):
-                        stopReason = self.ProcessPostResult.ConditionReached
-                        break
-                    if maxCount and postHints.processedCount == maxCount:
-                        stopReason = self.ProcessPostResult.MaxCountReached
-                        break
-                    if beforeTime and p['create_at'] >= beforeTime.timestamp:
-                        onSkippedPost()
-                        continue
-                    processor(Post.fromMattermost(p), postHints)
-                    postHints.processedCount += 1
-            else: # timeDirection == OrderDirection.Asc
-                windowIndex = len(postWindow['order'])-pageOffset - 1
-                for postId in reversed(postWindow['order'][:windowIndex + 1]):
-                    p = postWindow['posts'][postId]
-                    postHints.postIdBefore = postWindow['order'][windowIndex + 1] if windowIndex + 1 < len(postWindow['order']) else postWindow['prev_post_id'] if postWindow['prev_post_id'] != '' else None
-                    postHints.postIdAfter = postWindow['order'][windowIndex - 1] if windowIndex - 1 >= 0 else postWindow['next_post_id'] if postWindow['next_post_id'] != '' else None
-                    windowIndex -= 1
-                    if ((beforePost and p['id'] == beforePost)
-                        or (beforeTime and p['create_at'] > beforeTime.timestamp)):
-                        stopReason = self.ProcessPostResult.ConditionReached
-                        break
-                    if maxCount and postHints.processedCount == maxCount:
-                        stopReason = self.ProcessPostResult.MaxCountReached
-                        break
-                    if afterTime and p['create_at'] <= afterTime.timestamp:
-                        onSkippedPost()
-                        continue
-                    processor(Post.fromMattermost(p), postHints)
-                    postHints.processedCount += 1
+            for windowIndex, postId in enumerate(postWindow['order'][pageOffset:]):
+                p = postWindow['posts'][postId]
+                postHints.postIdBefore = postWindow['order'][windowIndex + 1] if windowIndex + 1 < len(postWindow['order']) else postWindow['prev_post_id'] if postWindow['prev_post_id'] != '' else None
+                postHints.postIdAfter = postWindow['order'][windowIndex - 1] if windowIndex - 1 >= 0 else postWindow['next_post_id'] if postWindow['next_post_id'] != '' else None
+                if ((afterPost and p['id'] == afterPost)
+                    or (afterTime and p['create_at'] < afterTime.timestamp)):
+                    stopReason = self.ProcessPostResult.ConditionReached
+                    break
+                if maxCount and postHints.processedCount == maxCount:
+                    stopReason = self.ProcessPostResult.MaxCountReached
+                    break
+                if beforeTime and p['create_at'] >= beforeTime.timestamp:
+                    onSkippedPost()
+                    continue
+                processor(Post.fromMattermost(p), postHints)
+                postHints.processedCount += 1
 
             # No messages recieved?
             if len(postWindow['order']) == 0:
-                # If we iterate from the end of the list, we may simply look beyond the end as channel message count is approximate
-                # (doesn't subtract deleted messages that aren't returned for common users)
-                if timeDirection == OrderDirection.Asc and not afterPost and page != 0:
-                    page -= 1
-                    continue
-                else:
-                    return self.ProcessPostResult.NoMorePosts
+                return self.ProcessPostResult.NoMorePosts
 
             if stopReason is not None:
                 return stopReason
-            if len(postWindow['order']) == 0:
-                return self.ProcessPostResult.NoMorePosts
             if maxCount and postHints.processedCount >= maxCount:
                 return self.ProcessPostResult.MaxCountReached
 
-            if timeDirection == OrderDirection.Desc:
-                if postWindow['prev_post_id'] == '':
-                    return self.ProcessPostResult.NoMorePosts
-                params.update(before = postWindow['order'][-1])
-            else:
-                if postWindow['next_post_id'] == '':
-                    return self.ProcessPostResult.NoMorePosts
-                params.update(after = postWindow['order'][0])
+            if postWindow['prev_post_id'] == '':
+                return self.ProcessPostResult.NoMorePosts
+            params.update(before = postWindow['order'][-1])
 
             if page != 0:
                 page = 0

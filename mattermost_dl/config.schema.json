@@ -72,10 +72,6 @@
           "description": "Only fetches post created before given timepoint.",
           "$ref": "#/definitions/timepoint"
         },
-        "downloadFromOldest": {
-          "description": "Selects download direction, going from oldest to newest by default.",
-          "type": "boolean"
-        },
         "maximumPostCount": {
           "description": "There cannot be more than this amount of posts in the storage. Good as sanity check on large channels for bulk download. Unlimited if -1 or default.",
           "type": "integer",
@@ -375,7 +371,7 @@
           "maximum": 1
         },
         "pageSize": {
-          "description": "Number of posts/items fetched per request (Mattermost max 200). Larger means fewer requests. Default 60.",
+          "description": "Number of posts/items fetched per request (Mattermost max 200). Larger means fewer requests. Default 200.",
           "type": "integer",
           "minimum": 1,
           "maximum": 200

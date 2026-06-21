@@ -104,8 +104,7 @@
             "type": "object",
             "required": [
                 "byteSize",
-                "count",
-                "organization"
+                "count"
             ],
             "properties": {
                 "count": {
@@ -113,24 +112,13 @@
                     "type": "integer",
                     "minimum": 0
                 },
-                "organization": {
-                    "description": "In what order are the messages sorted (from beggining of the storage toward the end). Continuous variants additionally contain all messages available in the time span from first post in storge to the last.",
-                    "type": "string",
-                    "enum": [
-                        "Unsorted",
-                        "Ascending",
-                        "Descending",
-                        "AscendingContinuous",
-                        "DescendingContinuous"
-                    ]
-                },
                 "byteSize": {
                     "description": "Size of the data file in bytes, useful for detecting file desync and rollback of append-only modification.",
                     "type": "integer",
                     "minimum": 0
                 },
                 "beginTime": {
-                    "description": "Start of the time range covered by the storage, in miliseconds since 1970-01-01. For example, in AscendingContinuous organization, begin time of 2000-01-01T00:00:00 would mean any posts after that time point are covered.",
+                    "description": "Start (oldest) of the continuous time range covered by the storage, in miliseconds since 1970-01-01. For example, a begin time of 2000-01-01T00:00:00 means posts from that time point onward are covered.",
                     "type": "integer"
                 },
                 "endTime": {
@@ -146,11 +134,11 @@
                     "type": "string"
                 },
                 "postIdBeforeFirst": {
-                    "description": "Post ID of the post that would be fetched if we extend the current storage organization beyond the starting point. Ommited if there is no (known) post before first one.",
+                    "description": "Post ID of the post that would be fetched if we extend the storage beyond its oldest post. Ommited if there is no (known) post before first one.",
                     "type": "string"
                 },
                 "postIdAfterLast": {
-                    "description": "Post ID of the post that would be fetched if we extend the current storage organization beyond the last post. Ommited if there is no (known) post after last one.",
+                    "description": "Post ID of the post that would be fetched if we extend the storage beyond its newest post. Ommited if there is no (known) post after last one.",
                     "type": "string"
                 }
             }

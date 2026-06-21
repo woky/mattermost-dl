@@ -209,7 +209,6 @@ group = [
   # User we're downloading as is there implicitly
 ]
 # Usual channel options are supported
-downloadFromOldest = false
 
 [[groups]]
 # We could specify group by usual Channel Id as well
@@ -269,7 +268,7 @@ afterPost = "abcdef" # Post Id
 ```toml
 [[users]]
 name = "username"
-downloadFromOldest = false
+# Downloads run newest->oldest, so a post cap keeps the newest N messages
 maximumPostCount = 10
 onExistingIncompatible = "delete"
 ```
