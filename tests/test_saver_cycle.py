@@ -132,8 +132,10 @@ class IncrementalTests(CycleTestBase):
         self.assertFalse(resumed)
         self.assertEqual(readStoredIds(data), ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'])
         self.assertFalse(tmp.exists())
-        # Only the new posts were requested (server-side after=p4).
-        self.assertTrue(all(req.get('after') == 'p4' for req in driver2.requestLog),
+        # The lower bound is enforced client-side: `after` is never sent to the server
+        # (sending it alongside the moving `before` cursor loops it forever), yet only
+        # the new posts p5..p7 are appended.
+        self.assertTrue(all('after' not in req for req in driver2.requestLog),
                         driver2.requestLog)
 
         storage = self.loadStorage(header)
@@ -158,7 +160,7 @@ class IncrementalTests(CycleTestBase):
         self.runCycle(saver2, channel)
 
         self.assertEqual(readStoredIds(data), ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'])
-        self.assertTrue(all(req.get('after') == 'p4' for req in driver2.requestLog),
+        self.assertTrue(all('after' not in req for req in driver2.requestLog),
                         driver2.requestLog)
         self.assertTrue(header.exists(), 'a fresh header is written on commit')
 

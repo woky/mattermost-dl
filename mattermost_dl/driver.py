@@ -337,12 +337,18 @@ class MattermostDriver:
             Loading happens lazily in batches, each post is passed to external callable.
 
             Download always runs newest->oldest, the Mattermost-native direction:
-                - add afterPost/beforePost filters; they work serverside and limit the fetched output
+                - `before`/`beforePost` is the only server-side cursor: seed it (resume
+                  or user lower bound), then after each page move it to the earliest
+                  fetched post and keep paging back.
+                - The lower bound (afterPost/afterTime) is enforced *client-side*, by
+                  stopping the walk when it is reached. It must NOT be sent to the
+                  server as `after=`: Mattermost does not intersect `after` with the
+                  moving `before` cursor (it honours `after` and ignores `before`), so
+                  the page never advances and the same newest posts repeat forever.
                 - apply offset
-                - start reading pages, after the first page set the `before` cursor to the
-                  earliest fetched post and keep paging back
-                    - skip posts newer than beforeTime, then start processing
-                    - continue collecting until the channel start, maxCount, afterPost or afterTime is reached
+                - skip posts newer than beforeTime, then start processing
+                - continue collecting until the channel start, maxCount, afterPost or
+                  afterTime is reached
         '''
         if not bufferSize:
             bufferSize = self.configfile.throttlingPageSize
@@ -355,8 +361,9 @@ class MattermostDriver:
         params: Dict[str, Any] = {
             'per_page': bufferSize
         }
-        if afterPost:
-            params.update(after=afterPost)
+        # NB: afterPost is deliberately NOT sent as `after=`; it is only a client-side
+        # stop (see the loop below). Sending it alongside the moving `before` cursor
+        # makes the server ignore the cursor and re-return the same page endlessly.
         if beforePost:
             params.update(before=beforePost)
 

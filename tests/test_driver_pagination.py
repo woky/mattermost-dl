@@ -1,7 +1,7 @@
 '''
-    Tests for the newest->oldest MattermostDriver.processPosts walk: pagination,
-    the server-side before/after cursors and the maxCount / afterTime / beforeTime
-    stop conditions.
+    Tests for the newest->oldest MattermostDriver.processPosts walk: pagination, the
+    server-side `before` cursor, the client-side afterPost/afterTime lower-bound stops
+    and the maxCount / beforeTime conditions.
 '''
 
 import tempfile
@@ -45,10 +45,13 @@ class ProcessPostsTests(unittest.TestCase):
         self.assertEqual(ids, ['p7', 'p6', 'p5'])
         self.assertEqual(result, MattermostDriver.ProcessPostResult.MaxCountReached)
 
-    def test_after_post_server_side(self):
-        # after=p4 -> only posts newer than p4.
+    def test_after_post_stops_walk(self):
+        # afterPost=p4 -> walk newest->oldest and stop when p4 is reached (client-side,
+        # never sent to the server as after=).
         ids, _ = self.collect(afterPost='p4')
         self.assertEqual(ids, ['p7', 'p6', 'p5'])
+        self.assertTrue(all('after' not in req for req in self.driver.requestLog),
+                        self.driver.requestLog)
 
     def test_after_time_backstops_deleted_after_post(self):
         # afterPost id is unknown (post deleted server-side); afterTime must stop us.
@@ -84,6 +87,58 @@ class ProcessPostsTests(unittest.TestCase):
                                      channel=makeChannel(messageCount=0))
         self.assertEqual(out, [])
         self.assertEqual(result, MattermostDriver.ProcessPostResult.NoMorePosts)
+
+
+class AfterWinsPostsDriver(FakePostsDriver):
+    '''
+        Models the observed real Mattermost behavior that the shared fake does not:
+        when a request carries both `after` and `before`, the server honors `after`
+        and IGNORES the `before` cursor. The old code sent both during an incremental
+        walk, so the cursor never advanced and the same newest page repeated forever.
+        A request cap turns that regression into a fast failure instead of a hang.
+    '''
+    MAX_REQUESTS = 500
+
+    def get(self, command, params=None):
+        if len(self.requestLog) >= self.MAX_REQUESTS:
+            raise AssertionError('processPosts did not terminate: after/before loop regressed')
+        params = dict(params or {})
+        if params.get('after') is not None:
+            params.pop('before', None)  # server ignores the cursor when after= is present
+        return super().get(command, params)
+
+
+class IncrementalAfterPostRegressionTests(unittest.TestCase):
+    '''Guards the fix for the infinite incremental re-fetch loop.'''
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.config = makeConfig(self._dir.name, pageSize=3)
+        self.posts = [mmPost(f'p{i}', i * 10) for i in range(1, 8)]  # p1..p7
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def test_incremental_with_few_new_posts_terminates_without_duplicates(self):
+        # data has p1..p4; channel now p1..p7. Incremental lower bound afterPost=p4.
+        # Against an after-wins server this looped forever emitting p7,p6,p5 repeatedly.
+        driver = AfterWinsPostsDriver(self.config, self.posts)
+        out = []
+        result = driver.processPosts(processor=lambda p, h: out.append(p.id),
+                                     channel=makeChannel(messageCount=7), afterPost='p4')
+        self.assertEqual(out, ['p7', 'p6', 'p5'])           # only the genuinely new posts
+        self.assertEqual(len(out), len(set(out)), 'no duplicates')
+        self.assertEqual(result, MattermostDriver.ProcessPostResult.ConditionReached)
+
+    def test_resumed_incremental_with_before_and_after_terminates(self):
+        # Both bounds present (resume cursor beforePost + incremental afterPost) -- the
+        # exact combination that triggered the loop.
+        driver = AfterWinsPostsDriver(self.config, self.posts)
+        out = []
+        driver.processPosts(processor=lambda p, h: out.append(p.id),
+                            channel=makeChannel(messageCount=7),
+                            beforePost='p6', afterPost='p2')
+        self.assertEqual(out, ['p5', 'p4', 'p3'])  # between p6 (excl) and p2 (stop)
+        self.assertEqual(len(out), len(set(out)), 'no duplicates')
 
 
 class PageSizeTests(unittest.TestCase):
