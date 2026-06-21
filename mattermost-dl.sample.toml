@@ -1,8 +1,8 @@
 # This is sample configuration that downloads few speciic channels
 
-version = "0"
+version = "1"
 
-downloadTeams=false
+downloadTeamChannels=false
 downloadGroupChannels=false
 downloadUserChannels=false
 
