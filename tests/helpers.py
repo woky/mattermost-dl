@@ -4,6 +4,7 @@
 
 import copy
 import json
+import threading
 from pathlib import Path
 
 from mattermost_dl import progress
@@ -37,6 +38,8 @@ class FakePostsDriver(MattermostDriver):
         self.allPosts = list(postsOldestToNewest)
         self.byId = {p['id']: p for p in self.allPosts}
         self.requestLog = []
+        # Guards requestLog so concurrent channel workers can share one driver.
+        self._logLock = threading.Lock()
         # Raise KeyboardInterrupt once this many `get` calls have been served,
         # to emulate a Ctrl-C mid-download.
         self.interruptAfterGets = interruptAfterGets
@@ -46,8 +49,10 @@ class FakePostsDriver(MattermostDriver):
 
     def get(self, command, params=None):
         params = dict(params or {})
-        self.requestLog.append(params)
-        if self.interruptAfterGets is not None and len(self.requestLog) > self.interruptAfterGets:
+        with self._logLock:
+            self.requestLog.append(params)
+            served = len(self.requestLog)
+        if self.interruptAfterGets is not None and served > self.interruptAfterGets:
             raise KeyboardInterrupt
         perPage = params.get('per_page', 60)
         page = params.get('page', 0)

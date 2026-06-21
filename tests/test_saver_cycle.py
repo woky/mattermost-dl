@@ -341,34 +341,32 @@ class InterruptResumeTests(CycleTestBase):
 
 
 class ProgressUxTests(CycleTestBase):
-    def ansiSaver(self, posts, pageSize=60):
-        config = makeConfig(self.dir, pageSize=pageSize)
-        # Force a real (visible) progress reporter regardless of tty.
-        config.reportProgress = progress.ProgressSettings(
-            mode=progress.VisualizationMode.AnsiEscapes, forceMode=True)
-        driver = FakePostsDriver(config, posts)
-        return makeSaver(config, driver)
-
-    def test_fresh_download_shows_progress(self):
-        saver = self.ansiSaver(self.allPosts, pageSize=3)
-        channel = makeChannel(messageCount=7)
+    def runCycleCapturingStderr(self, pageSize):
+        # Build the saver INSIDE the redirect so its progress manager targets the
+        # captured stream (it binds sys.stderr at construction).
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.runCycle(saver, channel)
-        self.assertIn('Progress:', err.getvalue())
+            config = makeConfig(self.dir, pageSize=pageSize)
+            config.progressInterval = 0  # render every update
+            config.reportProgress = progress.ProgressSettings(
+                mode=progress.VisualizationMode.AnsiEscapes, forceMode=True)
+            saver = makeSaver(config, FakePostsDriver(config, self.allPosts))
+            self.runCycle(saver, makeChannel(messageCount=7))
+        return err.getvalue()
+
+    def test_fresh_download_shows_live_progress(self):
+        out = self.runCycleCapturingStderr(pageSize=3)
+        self.assertIn('chan:', out)
+        self.assertIn('/7 posts', out)
 
     def test_up_to_date_channel_shows_no_progress_line(self):
-        # Commit p1..p7 quietly (DumbTerminal config).
+        # Commit p1..p7 quietly first (DumbTerminal config -> progress disabled).
         saver0, _ = self.saverFor(self.allPosts, pageSize=60)
-        channel = makeChannel(messageCount=7)
-        self.runCycle(saver0, channel)
-
-        # Re-run as a no-op incremental with the progress reporter forced on.
-        saver = self.ansiSaver(self.allPosts, pageSize=60)
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.runCycle(saver, channel)
-        self.assertNotIn('Progress:', err.getvalue(),
+        self.runCycle(saver0, makeChannel(messageCount=7))
+        # Re-run as a no-op incremental with progress forced on: nothing new is
+        # fetched, so the task never updates and no progress line is drawn.
+        out = self.runCycleCapturingStderr(pageSize=60)
+        self.assertNotIn('posts', out,
                          'an up-to-date channel must not print a frozen 0/N progress line')
 
 

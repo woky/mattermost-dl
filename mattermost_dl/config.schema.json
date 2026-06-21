@@ -380,6 +380,11 @@
           "description": "Per-request read timeout in seconds; a stalled connection aborts and is retried instead of hanging forever. Default 60.",
           "type": "number",
           "minimum": 1
+        },
+        "maxConcurrency": {
+          "description": "Upper bound on simultaneous HTTP requests (parallel channel and file downloads). Acts as a ceiling: under clustered network failures the effective concurrency is backed off automatically and ramped back up. Default 1 (fully sequential).",
+          "type": "integer",
+          "minimum": 1
         }
       }
     },

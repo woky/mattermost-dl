@@ -14,6 +14,11 @@ token = "76vnm1dwpo08v1f0etc5tp49mgn4pma1"
 
 [throttling]
 loopDelay = 100
+# Upper bound on simultaneous requests; channels and their files download in
+# parallel up to this many in-flight requests. Default 1 (sequential). Raising it
+# (e.g. 4-8) speeds up large/attachment-heavy backups; the effective concurrency is
+# automatically backed off if the server starts timing out or dropping connections.
+maxConcurrency = 4
 
 [output]
 # Relative to current working directory

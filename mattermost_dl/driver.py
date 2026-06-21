@@ -10,6 +10,9 @@ from .config import ConfigFile
 import json
 import random
 import requests
+import threading
+import time
+from collections import deque
 from time import sleep
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -19,6 +22,99 @@ class Cache:
     users: Dict[Id, User] = dataclassfield(default_factory=dict)
     teams: Dict[Id, Team] = dataclassfield(default_factory=dict)
     emojis: Dict[Id, Emoji] = dataclassfield(default_factory=dict)
+
+
+class AdaptiveConcurrency:
+    '''
+        Bounds the number of simultaneous HTTP requests and adapts it to observed
+        network health (AIMD, the same control TCP uses for congestion).
+
+        `ceiling` is the user-configured maximum. The effective limit `live` shrinks
+        multiplicatively toward `floor` (=1) when transient failures *cluster*, and
+        grows additively back toward the ceiling on sustained success. A single
+        isolated failure is treated as a flake and does not change concurrency.
+
+        On a failure cluster a shared `pauseUntil` instant is published; every worker
+        honors it before issuing its next request, so N workers don't independently
+        rediscover the same outage and retry-storm into a struggling server.
+
+        The whole thing is one Condition-guarded object shared by all worker threads.
+    '''
+    FAILURE_WINDOW = 15.0      # s; failures this close together count as a cluster
+    CLUSTER_THRESHOLD = 2      # failures within the window that trigger a backoff
+    GROWTH_THRESHOLD = 5       # consecutive successes before reclaiming one permit
+    DECREASE_COOLDOWN = 1.0    # s; coalesce a simultaneous failure burst into one cut
+
+    def __init__(self, ceiling: int, clock: Callable[[], float] = time.monotonic):
+        self.ceiling = max(1, ceiling)
+        self.floor = 1
+        self.live = self.ceiling
+        self.inFlight = 0
+        self.pauseUntil = 0.0
+        self._successStreak = 0
+        self._failures: "deque[float]" = deque()
+        self._lastDecrease = float('-inf')
+        self._clock = clock
+        self._cond = threading.Condition()
+
+    def acquire(self) -> None:
+        '''Block until a permit is free and any shared cooldown has elapsed.'''
+        with self._cond:
+            while True:
+                now = self._clock()
+                if now < self.pauseUntil:
+                    self._cond.wait(timeout=self.pauseUntil - now)
+                    continue
+                if self.inFlight >= self.live:
+                    self._cond.wait(timeout=1.0)
+                    continue
+                self.inFlight += 1
+                return
+
+    def release(self) -> None:
+        with self._cond:
+            if self.inFlight > 0:
+                self.inFlight -= 1
+            self._cond.notify_all()
+
+    def __enter__(self) -> 'AdaptiveConcurrency':
+        '''Hold one request permit for the duration of a `with` block.'''
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.release()
+        return False
+
+    def onSuccess(self) -> None:
+        '''A completed HTTP exchange: the network is healthy, grow back slowly.'''
+        with self._cond:
+            self._successStreak += 1
+            if self.live < self.ceiling and self._successStreak >= self.GROWTH_THRESHOLD:
+                self.live = min(self.ceiling, self.live + 1)
+                self._successStreak = 0
+                self._cond.notify_all()
+
+    def onTransientFailure(self, backoffSeconds: float = 0.0) -> None:
+        '''
+            A timeout / dropped connection / 429. Cuts concurrency and pauses all
+            workers only when failures cluster; a lone failure just ages out.
+        '''
+        with self._cond:
+            now = self._clock()
+            self._successStreak = 0
+            self._failures.append(now)
+            while self._failures and now - self._failures[0] > self.FAILURE_WINDOW:
+                self._failures.popleft()
+            if len(self._failures) < self.CLUSTER_THRESHOLD:
+                return
+            # Multiplicative decrease, but at most once per cooldown so a burst of
+            # concurrently-failing requests collapses `live` once, not N times.
+            if now - self._lastDecrease >= self.DECREASE_COOLDOWN:
+                self.live = max(self.floor, self.live // 2)
+                self._lastDecrease = now
+            self.pauseUntil = max(self.pauseUntil, now + max(0.0, backoffSeconds))
+            self._cond.notify_all()
 
 class MattermostDriver:
     API_PART = '/api/v4/'
@@ -37,7 +133,15 @@ class MattermostDriver:
         # Information we get along the way
         self.context: Dict[str, Any] = {}
         self.cache = Cache()
+        # Guards read-modify-write of the cache dicts when channels are downloaded
+        # concurrently (enrichment looks users up from many threads). Reentrant
+        # because some cache lookups call into others.
+        self.cacheLock = threading.RLock()
         self.session = requests.Session()
+        # Single source of truth for how many requests may be in flight at once,
+        # shared by every worker thread. At the default ceiling of 1 it is a no-op
+        # passthrough, preserving the original strictly-sequential behavior.
+        self.concurrency = AdaptiveConcurrency(config.throttlingMaxConcurrency)
 
     def onBadHttpResponse(self, request: str, result: requests.Response) -> NoReturn:
         message = None
@@ -82,34 +186,42 @@ class MattermostDriver:
         # Resilience: retry transient network failures with exponential backoff,
         # and honor server-side rate limiting (HTTP 429 + Retry-After) instead of
         # aborting. Other bad HTTP statuses are handled by onBadHttpResponse.
-        for attempt in range(self.HTTP_MAX_RETRIES + 1):
-            backoff = min(self.HTTP_RETRY_MAX_DELAY,
-                          self.HTTP_RETRY_BASE_DELAY * 2 ** attempt)
-            try:
-                r = self.session.get(url, headers=headers, params=params,
-                                      timeout=(self.HTTP_CONNECT_TIMEOUT,
-                                               self.configfile.throttlingRequestTimeout))
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    requests.exceptions.ChunkedEncodingError) as e:
-                if attempt == self.HTTP_MAX_RETRIES:
-                    logging.error(f"Request '{apiCommand}' failed after "
-                                  f"{attempt + 1} attempts: {e}")
-                    raise
-                logging.warning(f"Request '{apiCommand}' hit a transient network "
-                                f"error ({e}); retrying in {backoff:.0f}s "
-                                f"(attempt {attempt + 1}/{self.HTTP_MAX_RETRIES}).")
-                sleep(backoff)
-                continue
-            # Server is telling us to slow down: wait as instructed and retry.
-            if r.status_code == 429 and attempt < self.HTTP_MAX_RETRIES:
-                wait = self._retryAfterSeconds(r, default=backoff)
-                logging.warning(f"Request '{apiCommand}' was rate limited (429); "
-                                f"waiting {wait:.0f}s before retry "
-                                f"(attempt {attempt + 1}/{self.HTTP_MAX_RETRIES}).")
-                sleep(wait)
-                continue
-            break
+        # The concurrency governor caps simultaneous in-flight requests and adapts
+        # that cap down when failures cluster (and back up when they stop); a
+        # permit is held for the whole call, retries and backoff included.
+        with self.concurrency:
+            for attempt in range(self.HTTP_MAX_RETRIES + 1):
+                backoff = min(self.HTTP_RETRY_MAX_DELAY,
+                              self.HTTP_RETRY_BASE_DELAY * 2 ** attempt)
+                try:
+                    r = self.session.get(url, headers=headers, params=params,
+                                          timeout=(self.HTTP_CONNECT_TIMEOUT,
+                                                   self.configfile.throttlingRequestTimeout))
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ChunkedEncodingError) as e:
+                    self.concurrency.onTransientFailure(backoff)
+                    if attempt == self.HTTP_MAX_RETRIES:
+                        logging.error(f"Request '{apiCommand}' failed after "
+                                      f"{attempt + 1} attempts: {e}")
+                        raise
+                    logging.warning(f"Request '{apiCommand}' hit a transient network "
+                                    f"error ({e}); retrying in {backoff:.0f}s "
+                                    f"(attempt {attempt + 1}/{self.HTTP_MAX_RETRIES}).")
+                    sleep(backoff)
+                    continue
+                # Server is telling us to slow down: wait as instructed and retry.
+                if r.status_code == 429 and attempt < self.HTTP_MAX_RETRIES:
+                    wait = self._retryAfterSeconds(r, default=backoff)
+                    self.concurrency.onTransientFailure(wait)
+                    logging.warning(f"Request '{apiCommand}' was rate limited (429); "
+                                    f"waiting {wait:.0f}s before retry "
+                                    f"(attempt {attempt + 1}/{self.HTTP_MAX_RETRIES}).")
+                    sleep(wait)
+                    continue
+                # A completed HTTP exchange (even a 4xx/5xx): the network is healthy.
+                self.concurrency.onSuccess()
+                break
         if r.status_code != 200:
             self.onBadHttpResponse(apiCommand, r)
         return r
@@ -179,24 +291,28 @@ class MattermostDriver:
         self.authorizationToken = r.headers['Token']
 
     def getUserById(self, id: Id) -> User:
-        if id in self.cache.users:
-            return self.cache.users[id]
+        with self.cacheLock:
+            if id in self.cache.users:
+                return self.cache.users[id]
 
         userInfo = self.get('users/'+id)
         assert isinstance(userInfo, dict)
         u = User.fromMattermost(userInfo)
-        self.cache.users.update({u.id: u})
+        with self.cacheLock:
+            self.cache.users.update({u.id: u})
         return u
 
     def getUserByName(self, userName: str) -> User:
-        for user in self.cache.users.values():
-            if user.name == userName:
-                return user
+        with self.cacheLock:
+            for user in self.cache.users.values():
+                if user.name == userName:
+                    return user
 
         userInfo = self.get('users/username/'+userName)
         assert isinstance(userInfo, dict)
         u = User.fromMattermost(userInfo)
-        self.cache.users.update({u.id: u})
+        with self.cacheLock:
+            self.cache.users.update({u.id: u})
         return u
 
     def loadLocalUser(self) -> User:
@@ -205,14 +321,16 @@ class MattermostDriver:
         return u
 
     def getTeams(self) -> Dict[Id, Team]:
-        if len(self.cache.teams) != 0:
-            return self.cache.teams
+        with self.cacheLock:
+            if len(self.cache.teams) != 0:
+                return self.cache.teams
         teamInfos = self.get('users/{userId}/teams')
         assert isinstance(teamInfos, list)
-        for teamInfo in teamInfos:
-            t = Team.fromMattermost(teamInfo)
-            self.cache.teams.update({t.id: t})
-        return self.cache.teams
+        with self.cacheLock:
+            for teamInfo in teamInfos:
+                t = Team.fromMattermost(teamInfo)
+                self.cache.teams.update({t.id: t})
+            return self.cache.teams
 
     def getTeamById(self, teamId: Id) -> Team:
         return self.getTeams()[teamId]
@@ -448,7 +566,8 @@ class MattermostDriver:
             assert isinstance(emojiWindow, list)
             for emojiInfo in emojiWindow:
                 e = Emoji.fromMattermost(emojiInfo)
-                self.cache.emojis.update({e.id: e})
+                with self.cacheLock:
+                    self.cache.emojis.update({e.id: e})
                 processor(e)
             recieved += len(emojiWindow)
             if len(emojiWindow) < bufferSize or (maxCount and recieved >= maxCount):
@@ -466,17 +585,19 @@ class MattermostDriver:
     def getEmojiById(self, emojiId: Id) -> Emoji:
         if len(self.cache.emojis) == 0:
             self.getEmojiList()
-        if emojiId in self.cache.emojis:
-            return self.cache.emojis[emojiId]
-        else:
-            raise KeyError
+        with self.cacheLock:
+            if emojiId in self.cache.emojis:
+                return self.cache.emojis[emojiId]
+            else:
+                raise KeyError
 
     def getEmojiByName(self, emojiName: str) -> Emoji:
         if len(self.cache.emojis) == 0:
             self.getEmojiList()
-        for emoji in self.cache.emojis.values():
-            if emoji.name == emojiName:
-                return emoji
+        with self.cacheLock:
+            for emoji in self.cache.emojis.values():
+                if emoji.name == emojiName:
+                    return emoji
         raise KeyError
 
     def getEmojiUrl(self, emoji: Emoji) -> str:

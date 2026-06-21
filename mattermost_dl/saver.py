@@ -13,6 +13,8 @@ from .store import (ChannelHeader, PostStorage, countStoredPosts,
     iterPostsBackward, readLastStoredPost, trimDataFileNewerThan)
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from mimetypes import guess_extension
 
 @dataclass
@@ -50,6 +52,13 @@ class Saver:
         self.driver: MattermostDriver = driver
         self.recoveryArbiter: RecoveryArbiter = recoveryArbiter
         self.user: User # Conveniency, fetched on call
+        # Set to ask in-flight channel workers to wind down (e.g. on Ctrl-C); each
+        # leaves its resumable .tmp buffer behind. Only consulted when channels are
+        # downloaded concurrently; the sequential path relies on KeyboardInterrupt.
+        self.stopEvent = threading.Event()
+        # Single progress path: a live multi-line block on a tty (one line per active
+        # channel), plain periodic lines off a tty, nothing when disabled.
+        self.progress = self._makeProgressManager()
 
     def jsonDumpToFile(self, obj, fp):
         def fallback(obj):
@@ -238,40 +247,42 @@ class Saver:
         else:
             files = {}
 
-        showProgressReport = self.showProgressReport()
-
-        if showProgressReport:
-            reporter = progress.ProgressReporter(sys.stderr, settings=self.configfile.reportProgress,
-                header='Progress: ', footer=f'/{len(entities)} {entitiesName} (upper limit approximate)',
-                contentPadding=6, contentAlignLeft=False, updateIntervalMs=self.configfile.progressInterval)
-            reporter.open()
-            reporter.update('0')
-        else:
-            # Reporter should be never accessed in this case, but we want clear type for linting
-            reporter = cast(progress.ProgressReporter, UnboundLocalError)
-
-        for i, entity in enumerate(entities):
+        # First pass (no network): resolve cache hits and collect what actually
+        # needs downloading. Done up front so the output folder is created only when
+        # there is genuinely something to fetch, and so the parallel phase below
+        # works from a fixed list.
+        toDownload: list = []
+        for entity in entities:
             filename = getFilenameFromEntity(entity)
             if filename in files:
                 storeFilename(entity, files[filename])
-                continue
-            if not shouldDownload(entity):
-                continue
-            url = getUrlFromEntity(entity)
+            elif shouldDownload(entity):
+                toDownload.append(entity)
 
-            if not hasFolder:
-                dirName.mkdir()
-                hasFolder = True
+        if toDownload and not hasFolder:
+            dirName.mkdir()
+            hasFolder = True
 
-            suffix = getSuffixHint(entity)
-            storeFilename(entity, self.storeFile(
-                url=url, filename=filename, directoryName=dirName,
-                suffix=suffix, redownload=redownload))
+        def download(entity):
+            return entity, self.storeFile(
+                url=getUrlFromEntity(entity), filename=getFilenameFromEntity(entity),
+                directoryName=dirName, suffix=getSuffixHint(entity), redownload=redownload)
 
-            if showProgressReport:
-                reporter.update(str(i+1))
-        if showProgressReport:
-            reporter.close()
+        # Each file is an independent GET writing to a distinct path, so they
+        # download in parallel up to the configured ceiling; the driver's governor
+        # is the real cap on in-flight requests. Results are applied on this thread
+        # as they complete, so the progress task has a single writer.
+        # max_workers=1 (the default ceiling) preserves the original sequential walk.
+        workers = max(1, self.configfile.throttlingMaxConcurrency)
+        with self.progress.task(directoryName, unit=entitiesName) as task:
+            completed = 0
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(download, entity) for entity in toDownload]
+                for future in as_completed(futures):
+                    entity, storedName = future.result()
+                    storeFilename(entity, storedName)
+                    completed += 1
+                    task.update(completed, len(toDownload))
         logging.info(f"Processed all {entitiesName}.")
 
     def processAttachments(self, directoryName: str, channelOpts: ChannelOptions, attachments: Collection[FileAttachment], redownload: bool = False):
@@ -336,9 +347,16 @@ class Saver:
             for reaction in post.reactions:
                 self.enrichPostReaction(reaction)
 
-    def showProgressReport(self) -> bool:
-        return (self.configfile.verbosity == LogVerbosity.Normal
+    def _makeProgressManager(self) -> progress.ProgressManager:
+        '''
+            The one progress reporter for the whole run. Disabled (a no-op) for quiet
+            runs or when progress is switched off in config; otherwise the manager
+            renders a live multi-line block on a tty and plain periodic lines off one.
+        '''
+        enabled = (self.configfile.verbosity == LogVerbosity.Normal
             and self.configfile.reportProgress.mode != progress.VisualizationMode.DumbTerminal)
+        return progress.ProgressManager(sys.stderr, settings=self.configfile.reportProgress,
+            updateIntervalMs=self.configfile.progressInterval, enabled=enabled)
 
     def makeArchiveFilenames(self, stem: str) -> Tuple[Path, Path]:
         '''
@@ -609,33 +627,28 @@ class Saver:
             `priorCount` is how many posts a resumed buffer already holds, so the
             progress count continues from there instead of restarting at 0.
         '''
-        showProgressReport = self.showProgressReport()
         takeEmojis: bool = options.emojiMetadata or options.downloadEmoji
         bufferedCount = priorCount  # total posts in the buffer (prior + this run)
         sessionCount = 0            # posts fetched during this run only
 
-        with open(tmpFilename, 'a' if resume else 'w', encoding='utf8') as output:
-            if showProgressReport:
-                estimatedPostLimit: int = channel.messageCount
-                if options.postLimit != -1:
-                    estimatedPostLimit = min(estimatedPostLimit, options.postLimit)
-                if options.postSessionLimit != -1:
-                    estimatedPostLimit = min(estimatedPostLimit, options.postSessionLimit)
+        # Approximate upper bound used as the progress line's denominator.
+        estimatedPostLimit: int = channel.messageCount
+        if options.postLimit != -1:
+            estimatedPostLimit = min(estimatedPostLimit, options.postLimit)
+        if options.postSessionLimit != -1:
+            estimatedPostLimit = min(estimatedPostLimit, options.postSessionLimit)
 
-                progressReporter = progress.ProgressReporter(sys.stderr, settings=self.configfile.reportProgress,
-                    contentPadding=10, contentAlignLeft=False,
-                    header='Progress: ', footer=f'/{estimatedPostLimit} posts (upper limit approximate)',
-                    updateIntervalMs=self.configfile.progressInterval)
-            else:
-                # Reporter should be never accessed in this case, but we want clear type for linting
-                progressReporter = cast(progress.ProgressReporter, UnboundLocalError)
-            # The reporter is opened lazily on the first fetched post: a run with
-            # nothing new to download (e.g. an up-to-date channel) then shows no
-            # progress line at all, instead of a confusing frozen "0/N".
-            progressOpened = False
-
+        # The task line is drawn lazily on its first update, so an up-to-date channel
+        # (nothing fetched) shows no progress line at all.
+        with open(tmpFilename, 'a' if resume else 'w', encoding='utf8') as output, \
+                self.progress.task(channel.internalName) as task:
             def perPost(p: Post, hints: MattermostDriver.PostHints):
-                nonlocal bufferedCount, sessionCount, progressOpened
+                nonlocal bufferedCount, sessionCount
+                # Cooperative stop: bail out the same way a Ctrl-C would, leaving the
+                # partial buffer on disk so the next run resumes it. (At most one more
+                # page is fetched after a stop is requested.)
+                if self.stopEvent.is_set():
+                    raise KeyboardInterrupt
                 self.enrichPost(p)
                 if p.emojis:
                     if takeEmojis:
@@ -646,32 +659,15 @@ class Saver:
                 output.write('\n')
                 bufferedCount += 1
                 sessionCount += 1
-                if showProgressReport:
-                    if not progressOpened:
-                        progressReporter.open()
-                        progressOpened = True
-                    progressReporter.update(str(bufferedCount))
+                task.update(bufferedCount, estimatedPostLimit)
 
-            if showProgressReport:
-                skippedPostCount = 0
-                skippedLeadingMsg = False
-                def onSkippedPost():
-                    nonlocal skippedLeadingMsg, skippedPostCount
-                    if skippedPostCount % 99 == 0:
-                        if skippedLeadingMsg:
-                            print('.', end='', file=sys.stderr, flush=True)
-                        else:
-                            print(' ...skipping posts not matching condition...', end='', file=sys.stderr, flush=True)
-                            skippedLeadingMsg = True
-                    skippedPostCount += 1
-            else:
-                def onSkippedPost():
-                    pass
+            def onSkippedPost():
+                if self.stopEvent.is_set():
+                    raise KeyboardInterrupt
+                task.update(note='skipping posts outside the requested range')
 
             postProcessRes = self.driver.processPosts(processor=perPost, channel=channel, **dlParams, onSkippedPost=onSkippedPost)
 
-            if showProgressReport and progressOpened:
-                progressReporter.close()
             if postProcessRes == MattermostDriver.ProcessPostResult.NothingRequested:
                 logging.info('Nothing to download.')
             elif sessionCount == 0:
@@ -846,15 +842,68 @@ class Saver:
             teamChannels = self.getWantedPerTeamChannels()
 
             logging.info('Processing channels ...')
+            # Each channel has its own meta/data/.tmp files and is independent of the
+            # others, so they can download concurrently. Bind loop vars per task.
+            tasks: List[Callable[[], None]] = []
             for user, channel in directChannels.items():
-                self.processDirectChannel(user, channel)
+                tasks.append(lambda u=user, c=channel: self.processDirectChannel(u, c))
             for channel in groupChannels:
-                self.processGroupChannel(channel)
+                tasks.append(lambda c=channel: self.processGroupChannel(c))
             for team, perTeamChannels in teamChannels.items():
-                for channel in perTeamChannels:
-                    self.processTeamChannel(team, channel)
+                for channelReq in perTeamChannels:
+                    tasks.append(lambda t=team, c=channelReq: self.processTeamChannel(t, c))
+            # The progress manager owns the live region for the download phase and
+            # routes every log line above it, so the two never clobber each other.
+            with self.progress, self.progress.captureLogging():
+                self._processChannels(tasks)
         except KeyboardInterrupt:
             logging.info('Downloading interrupted.')
+            self.stopEvent.set()
             return
 
         logging.info('Download process completed succesfully.')
+
+    def _runChannelTask(self, task: Callable[[], None]):
+        '''
+            Runs one channel download in a worker, treating a cooperative stop
+            (KeyboardInterrupt raised once stopEvent is set) as a clean return so the
+            partial .tmp buffer is left for resuming and the pool isn't torn down.
+        '''
+        if self.stopEvent.is_set():
+            return
+        try:
+            task()
+        except KeyboardInterrupt:
+            self.stopEvent.set()
+
+    def _processChannels(self, tasks: List[Callable[[], None]]):
+        '''
+            Downloads the channels. At the default ceiling of 1 this is the original
+            strictly-sequential walk (and a real Ctrl-C propagates straight to the
+            caller). Above 1, channels run in a thread pool bounded by the same
+            ceiling; the driver's governor is the real cap on in-flight requests.
+        '''
+        workers = max(1, self.configfile.throttlingMaxConcurrency)
+        if workers == 1:
+            for task in tasks:
+                task()
+            return
+
+        firstError: Optional[BaseException] = None
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(self._runChannelTask, task) for task in tasks]
+            try:
+                for future in as_completed(futures):
+                    exc = future.exception()
+                    if exc is not None and firstError is None:
+                        # A genuine failure (not a cooperative stop): wind the others
+                        # down too, then re-raise once the pool has drained.
+                        firstError = exc
+                        self.stopEvent.set()
+            except KeyboardInterrupt:
+                # Ctrl-C reached the main thread while waiting; ask workers to stop
+                # (each leaves a resumable buffer) and let the pool drain.
+                self.stopEvent.set()
+                raise
+        if firstError is not None:
+            raise firstError
