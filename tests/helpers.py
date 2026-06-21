@@ -44,9 +44,6 @@ class FakePostsDriver(MattermostDriver):
         # to emulate a Ctrl-C mid-download.
         self.interruptAfterGets = interruptAfterGets
 
-    def delay(self):
-        pass  # no throttling in tests
-
     def get(self, command, params=None):
         params = dict(params or {})
         with self._logLock:

@@ -149,6 +149,59 @@ class AdaptiveConcurrencyTests(unittest.TestCase):
         t.join(1.0)
 
 
+class TokenBucketTests(unittest.TestCase):
+    '''The shared rate limiter inside the governor (deterministic via a fake clock).'''
+    def make(self, rate, ceiling=4):
+        self.clock = FakeClock()
+        return AdaptiveConcurrency(ceiling, rate=rate, clock=self.clock)
+
+    def test_starts_full_allowing_a_burst_then_throttles(self):
+        g = self.make(rate=2)  # capacity = max(1, rate) = 2
+        now = self.clock.t
+        self.assertEqual(g._tokenWaitLocked(now), 0.0)
+        g._consumeTokenLocked()
+        self.assertEqual(g._tokenWaitLocked(now), 0.0)
+        g._consumeTokenLocked()
+        # Bucket empty: the next token arrives in 1/rate seconds.
+        self.assertAlmostEqual(g._tokenWaitLocked(now), 0.5, places=6)
+
+    def test_refills_at_the_configured_rate(self):
+        g = self.make(rate=2)
+        now = self.clock.t
+        g._tokenWaitLocked(now); g._consumeTokenLocked()
+        g._tokenWaitLocked(now); g._consumeTokenLocked()  # drained
+        self.clock.advance(0.5)                            # 0.5s * 2/s = 1 token
+        self.assertEqual(g._tokenWaitLocked(self.clock.t), 0.0)
+        g._consumeTokenLocked()
+        self.assertAlmostEqual(g._tokenWaitLocked(self.clock.t), 0.5, places=6)
+
+    def test_tokens_capped_at_capacity(self):
+        g = self.make(rate=2)  # capacity 2
+        now = self.clock.t
+        g._tokenWaitLocked(now); g._consumeTokenLocked()
+        g._tokenWaitLocked(now); g._consumeTokenLocked()  # drained
+        self.clock.advance(100)  # would refill 200, but capacity caps it at 2
+        self.assertEqual(g._tokenWaitLocked(self.clock.t), 0.0); g._consumeTokenLocked()
+        self.assertEqual(g._tokenWaitLocked(self.clock.t), 0.0); g._consumeTokenLocked()
+        self.assertGreater(g._tokenWaitLocked(self.clock.t), 0.0)
+
+    def test_rate_zero_is_unlimited(self):
+        g = self.make(rate=0)
+        now = self.clock.t
+        for _ in range(100):
+            self.assertEqual(g._tokenWaitLocked(now), 0.0)
+            g._consumeTokenLocked()
+
+    def test_acquire_consumes_a_token(self):
+        clock = FakeClock()
+        g = AdaptiveConcurrency(4, rate=100, clock=clock)  # plenty of tokens, no blocking
+        start = g._tokens
+        for _ in range(3):
+            g.acquire()
+            g.release()
+        self.assertAlmostEqual(g._tokens, start - 3, places=6)
+
+
 class FakeResponse:
     def __init__(self, status_code=200, headers=None, content=b''):
         self.status_code = status_code

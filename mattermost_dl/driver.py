@@ -8,7 +8,6 @@ from .bo import *
 from .config import ConfigFile
 
 import json
-import random
 import requests
 import threading
 import time
@@ -38,6 +37,10 @@ class AdaptiveConcurrency:
         honors it before issuing its next request, so N workers don't independently
         rediscover the same outage and retry-storm into a struggling server.
 
+        Orthogonally, a shared token bucket caps the *aggregate* request rate (req/s)
+        across all workers, independent of how many run at once -- the proactive
+        politeness control that adaptive concurrency (reactive) does not provide.
+
         The whole thing is one Condition-guarded object shared by all worker threads.
     '''
     FAILURE_WINDOW = 15.0      # s; failures this close together count as a cluster
@@ -45,7 +48,8 @@ class AdaptiveConcurrency:
     GROWTH_THRESHOLD = 5       # consecutive successes before reclaiming one permit
     DECREASE_COOLDOWN = 1.0    # s; coalesce a simultaneous failure burst into one cut
 
-    def __init__(self, ceiling: int, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, ceiling: int, rate: float = 0.0,
+            clock: Callable[[], float] = time.monotonic):
         self.ceiling = max(1, ceiling)
         self.floor = 1
         self.live = self.ceiling
@@ -56,9 +60,16 @@ class AdaptiveConcurrency:
         self._lastDecrease = float('-inf')
         self._clock = clock
         self._cond = threading.Condition()
+        # Shared token bucket bounding aggregate requests/second. rate <= 0 disables
+        # it. It starts full, so a configured rate still allows a short initial burst
+        # (capped by the concurrency ceiling) before settling to the steady rate.
+        self.rate = max(0.0, rate)
+        self.capacity = max(1.0, self.rate)
+        self._tokens = self.capacity
+        self._lastRefill = clock()
 
     def acquire(self) -> None:
-        '''Block until a permit is free and any shared cooldown has elapsed.'''
+        '''Block until a permit, the shared cooldown, and a rate token all allow it.'''
         with self._cond:
             while True:
                 now = self._clock()
@@ -68,6 +79,11 @@ class AdaptiveConcurrency:
                 if self.inFlight >= self.live:
                     self._cond.wait(timeout=1.0)
                     continue
+                tokenWait = self._tokenWaitLocked(now)
+                if tokenWait > 0:
+                    self._cond.wait(timeout=tokenWait)
+                    continue
+                self._consumeTokenLocked()
                 self.inFlight += 1
                 return
 
@@ -76,6 +92,24 @@ class AdaptiveConcurrency:
             if self.inFlight > 0:
                 self.inFlight -= 1
             self._cond.notify_all()
+
+    def _tokenWaitLocked(self, now: float) -> float:
+        '''
+            Refill the bucket for elapsed time and report how many seconds until a
+            token is available (0 if one is now, or if rate limiting is disabled).
+        '''
+        if self.rate <= 0:
+            return 0.0
+        elapsed = now - self._lastRefill
+        self._lastRefill = now
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
+        if self._tokens >= 1.0:
+            return 0.0
+        return (1.0 - self._tokens) / self.rate
+
+    def _consumeTokenLocked(self) -> None:
+        if self.rate > 0:
+            self._tokens -= 1.0
 
     def __enter__(self) -> 'AdaptiveConcurrency':
         '''Hold one request permit for the duration of a `with` block.'''
@@ -138,10 +172,12 @@ class MattermostDriver:
         # because some cache lookups call into others.
         self.cacheLock = threading.RLock()
         self.session = requests.Session()
-        # Single source of truth for how many requests may be in flight at once,
-        # shared by every worker thread. At the default ceiling of 1 it is a no-op
-        # passthrough, preserving the original strictly-sequential behavior.
-        self.concurrency = AdaptiveConcurrency(config.throttlingMaxConcurrency)
+        # Single source of truth for request pacing, shared by every worker thread:
+        # caps both how many requests are in flight at once and the aggregate rate.
+        # At the default ceiling of 1 and rate 0 it is a no-op passthrough, preserving
+        # the original strictly-sequential, unthrottled behavior.
+        self.concurrency = AdaptiveConcurrency(config.throttlingMaxConcurrency,
+            rate=config.throttlingMaxRequestsPerSecond)
 
     def onBadHttpResponse(self, request: str, result: requests.Response) -> NoReturn:
         message = None
@@ -160,19 +196,6 @@ class MattermostDriver:
         logging.error(logmessage)
         result.raise_for_status()
         raise AssertionError # Never
-
-    def delay(self):
-        base = self.configfile.throttlingLoopDelay / 1000
-        if base <= 0:
-            return
-        # Randomize around the configured delay so the request cadence isn't
-        # perfectly periodic -- a steady machine-like pattern is both an easy
-        # automation fingerprint and a constant load. Mean stays ~= base.
-        # jitter is clamped to [0, 1] at config load, so the low bound is >= 0.
-        jitter = self.configfile.throttlingLoopDelayJitter
-        wait = random.uniform(base * (1 - jitter), base * (1 + jitter))
-        logging.debug(f"Throttle: waiting {wait:.3f}s ...")
-        sleep(wait)
 
     def getRaw(self, apiCommand: str, params: dict = {}) -> requests.Response:
         '''
@@ -420,7 +443,6 @@ class MattermostDriver:
                 break
 
             page += 1
-            self.delay()
 
         channel.members = res
 
@@ -540,7 +562,6 @@ class MattermostDriver:
                 del params['page']
             if pageOffset != 0:
                 pageOffset = 0
-            self.delay()  # jittered throttle between page fetches
 
     def getPosts(self, channel: Channel = None, *args, **kwargs) -> List[Post]:
         result = []
@@ -573,7 +594,6 @@ class MattermostDriver:
             if len(emojiWindow) < bufferSize or (maxCount and recieved >= maxCount):
                 break
             page += 1
-            self.delay()
 
     def getEmojiList(self, *args, **kwargs) -> List[Emoji]:
         result = []

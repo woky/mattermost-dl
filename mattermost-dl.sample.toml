@@ -13,12 +13,15 @@ username = "user.name"
 token = "76vnm1dwpo08v1f0etc5tp49mgn4pma1"
 
 [throttling]
-loopDelay = 100
 # Upper bound on simultaneous requests; channels and their files download in
 # parallel up to this many in-flight requests. Default 1 (sequential). Raising it
 # (e.g. 4-8) speeds up large/attachment-heavy backups; the effective concurrency is
 # automatically backed off if the server starts timing out or dropping connections.
 maxConcurrency = 4
+# Aggregate cap on requests per second across all workers (a shared token bucket).
+# Independent of maxConcurrency, this bounds steady-state load on the server -- the
+# polite-citizen knob. Default 0 (unlimited).
+maxRequestsPerSecond = 8
 
 [output]
 # Relative to current working directory

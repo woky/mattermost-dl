@@ -180,8 +180,7 @@ class ConfigFile:
     password: str = ''
     token: str = ''
 
-    throttlingLoopDelay: int = 0
-    throttlingLoopDelayJitter: float = 0.5
+    throttlingMaxRequestsPerSecond: float = 0.0
     throttlingPageSize: int = 200
     throttlingRequestTimeout: float = 60.0
     throttlingMaxConcurrency: int = 1
@@ -284,10 +283,8 @@ class ConfigFile:
 
         if 'throttling' in config:
             throttling = config['throttling']
-            if 'loopDelay' in throttling:
-                self.throttlingLoopDelay = throttling['loopDelay']
-            if 'loopDelayJitter' in throttling:
-                self.throttlingLoopDelayJitter = min(1.0, max(0.0, throttling['loopDelayJitter']))
+            if 'maxRequestsPerSecond' in throttling:
+                self.throttlingMaxRequestsPerSecond = max(0.0, throttling['maxRequestsPerSecond'])
             if 'pageSize' in throttling:
                 self.throttlingPageSize = min(200, max(1, throttling['pageSize']))
             if 'requestTimeout' in throttling:

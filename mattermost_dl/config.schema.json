@@ -359,16 +359,10 @@
     "throttling": {
       "type": "object",
       "properties": {
-        "loopDelay": {
-          "description": "Delay between bulk requests in ms.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "loopDelayJitter": {
-          "description": "Randomizes each loopDelay wait by +/- this fraction (0..1) so request timing is not perfectly periodic. Default 0.5.",
+        "maxRequestsPerSecond": {
+          "description": "Aggregate cap on outgoing HTTP requests per second across all concurrent workers (a shared token bucket). Bounds steady-state load on the server regardless of maxConcurrency; covers post, metadata and file requests alike. Default 0 (unlimited).",
           "type": "number",
-          "minimum": 0,
-          "maximum": 1
+          "minimum": 0
         },
         "pageSize": {
           "description": "Number of posts/items fetched per request (Mattermost max 200). Larger means fewer requests. Default 200.",
