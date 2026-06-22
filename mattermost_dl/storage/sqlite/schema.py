@@ -10,6 +10,12 @@
 
     Every table carries a real rowid (no ``WITHOUT ROWID``) and a plain ``raw``
     column so sqlite-zstd can later compress those columns with no schema change.
+
+    Some derived data is maintained by triggers on ``posts`` rather than recomputed at
+    query time: the FTS index (``posts_ai``/``au``/``ad``) and, since v3, each post's
+    thread position and size (``posts_thread_ai``/``au``/``ad`` feeding the ``threads``
+    and ``post_threads`` side tables) so a consumer can render "3/34" with a couple of
+    PK joins instead of a per-row correlated COUNT.
 '''
 
 import sqlite3
@@ -97,10 +103,81 @@ CREATE INDEX posts_user_idx ON posts(user_id, create_at);
 CREATE INDEX posts_user_channel_idx ON posts(user_id, channel_id, create_at);
 '''
 
+# v3: precomputed thread position/size, so a consumer can render "3/34" (3rd post in a
+# 34-post thread) without a per-row correlated COUNT at query time. A thread is flat: a
+# root post (root_id NULL) plus every post sharing that root_id, ordered by create_at.
+# Two slim side tables keep the posts row and the FTS index untouched: `threads` holds
+# one size per thread root, `post_threads` one position per post. They are maintained by
+# an insert/update/delete trigger trio that mirrors the FTS posts_ai/au/ad set, plus a
+# one-time set-based backfill of any pre-existing posts. All archived posts count,
+# including deleted ones (delete_at>0). See `backend.py`'s commit() for the insert order
+# the AI trigger's index relies on.
+_V3 = '''
+CREATE TABLE threads (
+    root_id TEXT PRIMARY KEY, size INTEGER NOT NULL
+);  -- keyed by thread root (a reply's root_id even when its root isn't archived); not a FK
+CREATE TABLE post_threads (
+    post_id TEXT PRIMARY KEY REFERENCES posts(id),
+    thread_root TEXT NOT NULL, thread_index INTEGER NOT NULL
+);  -- one row per post; a standalone post is a thread of size 1 at index 1
+CREATE INDEX post_threads_root_idx ON post_threads(thread_root);
+
+-- AI: bump (or seed) the thread size, then read it back as this post's index. The index
+-- is correct because posts are inserted in non-decreasing create_at order within a
+-- thread (commit() drains staging ORDER BY create_at ASC, and incremental runs only add
+-- newer posts -- a reply's create_at always exceeds its root's), so the new post is
+-- always the thread's newest member and its index is the post-increment size. A re-run
+-- of an existing post takes the upsert's UPDATE path (posts_thread_au), not this one, so
+-- it never double-counts.
+CREATE TRIGGER posts_thread_ai AFTER INSERT ON posts BEGIN
+    INSERT INTO threads(root_id, size)
+        VALUES (coalesce(new.root_id, new.id), 1)
+        ON CONFLICT(root_id) DO UPDATE SET size = size + 1;
+    INSERT INTO post_threads(post_id, thread_root, thread_index)
+        VALUES (new.id, coalesce(new.root_id, new.id),
+                (SELECT size FROM threads WHERE root_id = coalesce(new.root_id, new.id)));
+END;
+-- AU: fires only when a post is actually re-homed to another thread. A normal re-upsert
+-- rewrites root_id to the same value, so the WHEN guard makes it a no-op (both operands
+-- of <> are non-null -- coalesce backs root_id with the NOT NULL id). Re-homing does not
+-- happen in Mattermost; kept for symmetry with the FTS trigger set. The moved post
+-- leaves its old thread and rejoins the new one as its newest member.
+CREATE TRIGGER posts_thread_au AFTER UPDATE ON posts
+WHEN coalesce(new.root_id, new.id) <> coalesce(old.root_id, old.id)
+BEGIN
+    UPDATE threads SET size = size - 1 WHERE root_id = coalesce(old.root_id, old.id);
+    DELETE FROM post_threads WHERE post_id = old.id;
+    INSERT INTO threads(root_id, size)
+        VALUES (coalesce(new.root_id, new.id), 1)
+        ON CONFLICT(root_id) DO UPDATE SET size = size + 1;
+    INSERT INTO post_threads(post_id, thread_root, thread_index)
+        VALUES (new.id, coalesce(new.root_id, new.id),
+                (SELECT size FROM threads WHERE root_id = coalesce(new.root_id, new.id)));
+END;
+-- AD: defensive insurance, like the FTS posts_ad. The archive never deletes posts, so
+-- this never fires in practice; if it did it would decrement the size and drop the row,
+-- leaving an index gap (renumbering is not trigger-friendly) -- acceptable precisely
+-- because it does not occur.
+CREATE TRIGGER posts_thread_ad AFTER DELETE ON posts BEGIN
+    UPDATE threads SET size = size - 1 WHERE root_id = coalesce(old.root_id, old.id);
+    DELETE FROM post_threads WHERE post_id = old.id;
+END;
+
+-- One-time backfill of pre-existing posts (set-based; inserts into the new tables
+-- directly, so the per-row posts triggers above never fire). No-op on a fresh database.
+INSERT INTO post_threads(post_id, thread_root, thread_index)
+SELECT id, coalesce(root_id, id),
+       row_number() OVER (PARTITION BY coalesce(root_id, id) ORDER BY create_at, id)
+FROM posts;
+INSERT INTO threads(root_id, size)
+SELECT coalesce(root_id, id), count(*) FROM posts GROUP BY coalesce(root_id, id);
+'''
+
 # Ordered list of (version, DDL). Append new steps; never edit a shipped one.
 MIGRATIONS: List[Tuple[int, str]] = [
     (1, _V1),
     (2, _V2),
+    (3, _V3),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

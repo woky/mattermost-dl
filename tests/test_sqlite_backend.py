@@ -7,13 +7,15 @@
     promoted columns, inline asset BLOBs, FTS5 MATCH/bm25 and schema migrations.
 '''
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from mattermost_dl.config import ChannelOptions
 from mattermost_dl.saver import ChannelRequest
-from mattermost_dl.storage.sqlite.schema import LATEST_VERSION
+from mattermost_dl.storage.sqlite.schema import (LATEST_VERSION, MIGRATIONS,
+                                                 applyMigrations)
 
 from .helpers import (FakePostsDriver, makeChannel, makeConfig, makeSqliteSaver,
                       mmPost, seedStaging, sqliteCursor)
@@ -169,14 +171,26 @@ class DedupTests(SqliteTestBase):
 
 
 class ThreadTests(SqliteTestBase):
-    def test_thread_reconstructed_from_columns(self):
-        posts = [
+    def threadPosts(self):
+        # root + two replies + an unrelated standalone post.
+        return [
             mmPost('root', 10, message='root msg'),
             mmPost('r1', 20, message='reply one', root_id='root'),
             mmPost('r2', 30, message='reply two', root_id='root'),
             mmPost('other', 40, message='unrelated'),
         ]
-        saver, _ = self.saverFor(posts)
+
+    def threadInfo(self, saver):
+        '''post_id -> (thread_index, thread_size), via the consumer join.'''
+        with sqliteCursor(saver) as conn:
+            return {r['id']: (r['thread_index'], r['size']) for r in conn.execute(
+                'SELECT p.id, pt.thread_index, t.size '
+                'FROM posts p '
+                'JOIN post_threads pt ON pt.post_id = p.id '
+                'JOIN threads t ON t.root_id = pt.thread_root').fetchall()}
+
+    def test_thread_reconstructed_from_columns(self):
+        saver, _ = self.saverFor(self.threadPosts())
         self.runCycle(saver, makeChannel(id=CHAN, messageCount=4))
 
         # A flat thread is the root plus every post sharing its root_id, ordered by
@@ -186,6 +200,53 @@ class ThreadTests(SqliteTestBase):
                 'SELECT id FROM posts WHERE id=:root OR root_id=:root ORDER BY create_at',
                 {'root': 'root'}).fetchall()]
         self.assertEqual(ids, ['root', 'r1', 'r2'])
+
+    def test_thread_index_and_size_precomputed(self):
+        # Every post knows its 1-based position and its thread's total -- the "3/34".
+        saver, _ = self.saverFor(self.threadPosts())
+        self.runCycle(saver, makeChannel(id=CHAN, messageCount=4))
+        self.assertEqual(self.threadInfo(saver), {
+            'root': (1, 3), 'r1': (2, 3), 'r2': (3, 3), 'other': (1, 1)})
+
+    def test_thread_size_grows_incrementally(self):
+        posts = self.threadPosts()
+        saver1, _ = self.saverFor(posts[:2])  # root + r1
+        self.runCycle(saver1, makeChannel(id=CHAN, messageCount=2))
+        self.assertEqual(self.threadInfo(saver1), {'root': (1, 2), 'r1': (2, 2)})
+
+        saver2, _ = self.saverFor(posts[:3])  # a later run adds the newer r2
+        self.runCycle(saver2, makeChannel(id=CHAN, messageCount=3))
+        # r2 appends as the thread's newest member; root/r1 keep their positions.
+        self.assertEqual(self.threadInfo(saver2),
+                         {'root': (1, 3), 'r1': (2, 3), 'r2': (3, 3)})
+
+    def test_thread_for_reply_without_archived_root(self):
+        # Only the replies are archived (the root post itself is absent); they still
+        # form a thread keyed by their shared root_id.
+        posts = [
+            mmPost('r1', 20, message='reply one', root_id='root'),
+            mmPost('r2', 30, message='reply two', root_id='root'),
+        ]
+        saver, _ = self.saverFor(posts)
+        self.runCycle(saver, makeChannel(id=CHAN, messageCount=2))
+        self.assertEqual(
+            self.scalar(saver, "SELECT size FROM threads WHERE root_id='root'"), 2)
+        self.assertEqual(self.threadInfo(saver), {'r1': (1, 2), 'r2': (2, 2)})
+
+    def test_recommit_does_not_double_count(self):
+        # Re-committing already-stored posts takes the upsert's UPDATE path (the AU
+        # trigger, whose WHEN guard is false), so thread sizes must not grow.
+        posts = self.threadPosts()
+        saver, _ = self.saverFor(posts)
+        channel = makeChannel(id=CHAN, messageCount=4)
+        self.runCycle(saver, channel)
+
+        archive = saver.backend.channelArchive(OUTFILE, channel, None, ChannelOptions(), [])
+        seedStaging(saver, CHAN, posts)
+        archive.commit(incremental=True, localNewestId='other')
+
+        self.assertEqual(self.threadInfo(saver), {
+            'root': (1, 3), 'r1': (2, 3), 'r2': (3, 3), 'other': (1, 1)})
 
 
 class AssetTests(SqliteTestBase):
@@ -324,6 +385,37 @@ class MigrationTests(SqliteTestBase):
         saver2.backend.open()
         self.assertEqual(self.scalar(saver2, 'PRAGMA user_version'), LATEST_VERSION)
         self.assertEqual(self.scalar(saver2, 'SELECT count(*) FROM posts'), 7)
+
+    def test_v3_backfills_thread_tables_for_existing_posts(self):
+        # An older archive (schema v2, no thread tables) with posts already stored: the
+        # v3 migration must create and backfill threads/post_threads from those posts.
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        for ver, sql in MIGRATIONS:
+            if ver > 2:
+                break
+            conn.executescript(f'BEGIN;\n{sql}\nPRAGMA user_version = {ver};\nCOMMIT;')
+        # Inserted out of create_at order to prove the backfill ranks by create_at,id.
+        conn.executemany(
+            'INSERT INTO posts(id, channel_id, root_id, message, create_at, raw) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            [('r2', 'c', 'root', 'm', 30, '{}'),
+             ('root', 'c', None, 'm', 10, '{}'),
+             ('r1', 'c', 'root', 'm', 20, '{}'),
+             ('other', 'c', None, 'm', 40, '{}')])
+        conn.commit()
+
+        applyMigrations(conn)  # runs v3: creates the tables, then backfills
+
+        self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], LATEST_VERSION)
+        self.assertEqual(dict(conn.execute('SELECT root_id, size FROM threads').fetchall()),
+                         {'root': 3, 'other': 1})
+        self.assertEqual(
+            {r['post_id']: (r['thread_root'], r['thread_index'])
+             for r in conn.execute('SELECT * FROM post_threads').fetchall()},
+            {'root': ('root', 1), 'r1': ('root', 2), 'r2': ('root', 3),
+             'other': ('other', 1)})
+        conn.close()
 
 
 if __name__ == '__main__':
