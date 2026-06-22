@@ -178,6 +178,8 @@ class ConfigFile:
 
     outputDirectory: Path = Path()
     outputFormat: str = 'directory-json'
+    # Explicit DB path for the sqlite backend; defaults under outputDirectory.
+    outputSqlitePath: Optional[Path] = None
     downloadAllEmojis: bool = False
 
     verbosity: LogVerbosity = LogVerbosity.Normal
@@ -277,6 +279,8 @@ class ConfigFile:
                 self.outputDirectory = Path(output['directory'])
             if 'format' in output:
                 self.outputFormat = output['format']
+            if 'sqlite' in output and 'path' in output['sqlite']:
+                self.outputSqlitePath = Path(output['sqlite']['path'])
 
         if 'report' in config:
             reportingOptions = config['report']

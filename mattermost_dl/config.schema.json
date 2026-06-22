@@ -372,11 +372,24 @@
           "type": "string"
         },
         "format": {
-          "description": "Storage backend / output format. Currently only the default directory of JSON files is supported.",
+          "description": "Storage backend / output format: a directory of JSON files (default) or a normalized, full-text-searchable SQLite database.",
           "type": "string",
           "enum": [
-            "directory-json"
+            "directory-json",
+            "sqlite"
           ]
+        },
+        "sqlite": {
+          "description": "Options for the sqlite output format.",
+          "type": "object",
+          "additionalProperties": false,
+          "additionalPropertiesWarn": true,
+          "properties": {
+            "path": {
+              "description": "Path to the SQLite database file. Defaults to a .sqlite file under the output directory.",
+              "type": "string"
+            }
+          }
         }
       }
     },

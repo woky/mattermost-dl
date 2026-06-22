@@ -4,7 +4,9 @@
 
 import copy
 import json
+import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from mattermost_dl import progress
@@ -31,16 +33,32 @@ class FakePostsDriver(MattermostDriver):
         real newest->oldest walk relies on. `requestLog` records every query so a
         test can assert what was (and was not) re-fetched.
     '''
-    def __init__(self, config, postsOldestToNewest, interruptAfterGets=None):
+    def __init__(self, config, postsOldestToNewest, interruptAfterGets=None,
+                 postsByChannel=None):
         super().__init__(config)
         self.allPosts = list(postsOldestToNewest)
         self.byId = {p['id']: p for p in self.allPosts}
+        # Optional {channelId: [posts oldest->newest]} so concurrent channels can
+        # serve distinct, globally-unique post ids (mirroring real Mattermost).
+        self.postsByChannel = postsByChannel
         self.requestLog = []
-        # Guards requestLog so concurrent channel workers can share one driver.
+        # URLs fetched for asset blobs (attachments/emoji images/avatars).
+        self.fetchedUrls = []
+        # Guards requestLog/fetchedUrls so concurrent channel workers can share one driver.
         self._logLock = threading.Lock()
         # Raise KeyboardInterrupt once this many `get` calls have been served,
         # to emulate a Ctrl-C mid-download.
         self.interruptAfterGets = interruptAfterGets
+
+    def _postsForCommand(self, command):
+        '''The channel's posts oldest->newest; per-channel map wins, else the
+        single shared list (channel-agnostic, the common single-channel case).'''
+        if self.postsByChannel is not None:
+            import re
+            m = re.match(r'channels/([^/]+)/posts', command)
+            if m:
+                return self.postsByChannel.get(m.group(1), [])
+        return self.allPosts
 
     def get(self, command, params=None):
         params = dict(params or {})
@@ -54,14 +72,18 @@ class FakePostsDriver(MattermostDriver):
         before = params.get('before')
         after = params.get('after')
 
-        cands = list(reversed(self.allPosts))  # newest -> oldest
+        # Local to this call (no shared mutation), so concurrent channel workers
+        # sharing one driver stay thread-safe.
+        allPosts = self._postsForCommand(command)
+        byId = {p['id']: p for p in allPosts}
+        cands = list(reversed(allPosts))  # newest -> oldest
         # `before`/`after` are no-ops if the referenced post is unknown (e.g. it was
         # deleted server-side), matching the real API and exercising the time stops.
-        if before is not None and before in self.byId:
-            boundary = self.byId[before]['create_at']
+        if before is not None and before in byId:
+            boundary = byId[before]['create_at']
             cands = [p for p in cands if p['create_at'] < boundary]
-        if after is not None and after in self.byId:
-            boundary = self.byId[after]['create_at']
+        if after is not None and after in byId:
+            boundary = byId[after]['create_at']
             cands = [p for p in cands if p['create_at'] > boundary]
 
         start = page * perPage
@@ -87,6 +109,13 @@ class FakePostsDriver(MattermostDriver):
             'create_at': 0, 'update_at': 0, 'delete_at': 0,
         }
 
+    def storeUrlInto(self, url, fp):
+        '''Serve deterministic per-url bytes and record every fetch, so asset
+        tests can assert content was stored and that re-runs skip present blobs.'''
+        with self._logLock:
+            self.fetchedUrls.append(url)
+        fp.write(('BYTES:' + url).encode())
+
 
 def makeConfig(outdir, pageSize=60):
     config = ConfigFile()
@@ -110,6 +139,36 @@ def makeChannel(id='chan', messageCount=100):
 
 def makeSaver(config, driver):
     return Saver(config, driver=driver)
+
+
+def makeSqliteSaver(config, driver):
+    '''A Saver wired to the sqlite backend at a deterministic db path.'''
+    config.outputFormat = 'sqlite'
+    config.outputSqlitePath = config.outputDirectory / 'archive.sqlite'
+    return Saver(config, driver=driver)
+
+
+@contextmanager
+def sqliteCursor(saver):
+    '''A read cursor on the sqlite archive the saver produced (row access by name).'''
+    conn = sqlite3.connect(saver.backend.path)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def seedStaging(saver, channelId, posts):
+    '''Pre-populate a channel's resume buffer with raw posts (for resume tests).'''
+    saver.backend.open()  # ensure connection + schema exist
+    with saver.backend.locked() as conn:
+        conn.executemany(
+            'INSERT OR REPLACE INTO posts_staging(channel_id, id, create_at, raw) '
+            'VALUES (?, ?, ?, ?)',
+            [(channelId, p['id'], p['create_at'],
+              json.dumps(p, ensure_ascii=False, separators=(',', ':'))) for p in posts])
+        conn.commit()
 
 
 def readStoredIds(dataFile):

@@ -121,3 +121,10 @@ class StorageBackend(ABC):
             `seedUsers`  raw user replies known to participate up front (e.g. the
                          two parties of a direct channel).
         '''
+
+    @abstractmethod
+    def downloadEmojiDatabase(self, rawEmojis: Iterable[dict]) -> None:
+        '''
+            Persist the server's whole custom-emoji database (the run-level
+            `downloadEmojis` option), fed the raw emoji API replies.
+        '''
