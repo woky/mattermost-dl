@@ -317,6 +317,26 @@ class ProgressUxTests(CycleTestBase):
         self.assertNotIn('posts', out,
                          'an up-to-date channel must not print a frozen 0/N progress line')
 
+    def test_friendly_label_overrides_internal_channel_name(self):
+        # Direct/group channels have a user-id blob for an internal name; the caller
+        # threads a friendly label so the progress line is readable.
+        internalName = 'f9zyoyedmjnw8xzd8dzrw7noec__ughps6ykef8sx8as39xa9dmmic'
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            config = makeConfig(self.dir, pageSize=3)
+            config.progressInterval = 0  # render every update
+            config.reportProgress = progress.ProgressSettings(
+                mode=progress.VisualizationMode.AnsiEscapes, forceMode=True)
+            saver = makeSaver(config, FakePostsDriver(config, self.allPosts))
+            channel = makeChannel(id=internalName, messageCount=7)
+            options = ChannelOptions()
+            archive = saver.backend.channelArchive(OUTFILE, channel, None, options, [])
+            saver._runDownloadCycle(archive, channel, options, label='@otheruser')
+        out = err.getvalue()
+        self.assertIn('@otheruser:', out)
+        self.assertNotIn(internalName, out,
+                         'the user-id internal name must not leak onto the progress line')
+
 
 if __name__ == '__main__':
     unittest.main()

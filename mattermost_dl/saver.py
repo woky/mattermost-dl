@@ -261,7 +261,8 @@ class Saver:
         return params
 
     def processChannel(self, channelOutfile: str, channelRequest: ChannelRequest, *,
-            team: Optional[dict] = None, seedUsers: Iterable[dict] = ()):
+            team: Optional[dict] = None, seedUsers: Iterable[dict] = (),
+            label: Optional[str] = None):
         '''
             Downloads a channel into the storage backend.
 
@@ -279,14 +280,15 @@ class Saver:
 
         archive = self.backend.channelArchive(channelOutfile, channel, team, options, seedUsers)
 
-        resumed = self._runDownloadCycle(archive, channel, options)
+        resumed = self._runDownloadCycle(archive, channel, options, label=label)
         if resumed:
             # The resumed buffer's newest post was frozen at the channel-newest of
             # the interrupted run; run one fresh incremental to capture anything that
             # has arrived above it since.
-            self._runDownloadCycle(archive, channel, options)
+            self._runDownloadCycle(archive, channel, options, label=label)
 
-    def _runDownloadCycle(self, archive, channel: dict, options: ChannelOptions) -> bool:
+    def _runDownloadCycle(self, archive, channel: dict, options: ChannelOptions, *,
+            label: Optional[str] = None) -> bool:
         '''
             One pass of the state machine: reconcile any interrupted buffer, fetch
             newest->oldest into the buffer, then commit it.
@@ -306,12 +308,13 @@ class Saver:
             localNewestId=localNewestId, localNewestTime=localNewestTime)
 
         self._fetchIntoBuffer(archive, channel, options, resume=resumeState.resume,
-            dlParams=dlParams, priorCount=resumeState.priorCount)
+            dlParams=dlParams, priorCount=resumeState.priorCount, label=label)
         archive.commit(incremental=incremental, localNewestId=localNewestId)
         return resumeState.resume
 
     def _fetchIntoBuffer(self, archive, channel: dict, options: ChannelOptions, *,
-            resume: bool, dlParams: Dict[str, Any], priorCount: int = 0):
+            resume: bool, dlParams: Dict[str, Any], priorCount: int = 0,
+            label: Optional[str] = None):
         '''
             Streams raw posts newest->oldest into the backend's staging buffer
             (append when resuming, else fresh). On interruption the partial buffer
@@ -319,6 +322,10 @@ class Saver:
 
             `priorCount` is how many posts a resumed buffer already holds, so the
             progress count continues from there instead of restarting at 0.
+
+            `label` is the human-readable name shown on the progress line; it falls
+            back to the channel's internal name. Direct and group channels pass a
+            friendly label because their internal name is a user-id blob.
         '''
         bufferedCount = priorCount  # total posts in the buffer (prior + this run)
         sessionCount = 0            # posts fetched during this run only
@@ -333,7 +340,7 @@ class Saver:
         # The task line is drawn lazily on its first update, so an up-to-date channel
         # (nothing fetched) shows no progress line at all.
         with archive.stagingWriter(resume=resume) as writer, \
-                self.progress.task(channel['name']) as task:
+                self.progress.task(label or channel['name']) as task:
             def perPost(rawPost: dict, hints: PostHints):
                 nonlocal bufferedCount, sessionCount
                 # Cooperative stop: bail out the same way a Ctrl-C would, leaving the
@@ -368,7 +375,8 @@ class Saver:
     def processDirectChannel(self, otherUser: dict, channelRequest: ChannelRequest):
         logging.info(f"Processing conversation with {otherUser['username']} ...")
         directChannelOutfile = f"d.{self.user['username']}--{otherUser['username']}"
-        self.processChannel(directChannelOutfile, channelRequest, seedUsers=[self.user, otherUser])
+        self.processChannel(directChannelOutfile, channelRequest, seedUsers=[self.user, otherUser],
+            label=f"@{otherUser['username']}")
 
     def processGroupChannel(self, channelRequest: ChannelRequest):
         channel = channelRequest.metadata
@@ -379,7 +387,7 @@ class Saver:
             userlist = str(channel['id'])
         logging.info(f"Processing group chat {userlist} ...")
         channelOutfile = f'g.{userlist}'
-        self.processChannel(channelOutfile, channelRequest)
+        self.processChannel(channelOutfile, channelRequest, label=userlist)
 
     def processTeamChannel(self, team: dict, channelRequest: ChannelRequest):
         '''
