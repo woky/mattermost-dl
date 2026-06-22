@@ -40,9 +40,7 @@ CREATE TABLE posts (
     user_id TEXT REFERENCES users(id),
     root_id TEXT, type TEXT, message TEXT,
     create_at INTEGER NOT NULL, edit_at INTEGER, delete_at INTEGER,
-    raw TEXT NOT NULL,
-    created_at_iso TEXT GENERATED ALWAYS AS
-        (datetime(create_at / 1000, 'unixepoch')) VIRTUAL
+    raw TEXT NOT NULL
 );
 CREATE INDEX posts_channel_idx ON posts(channel_id, create_at);
 CREATE INDEX posts_root_idx ON posts(root_id);
