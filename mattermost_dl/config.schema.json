@@ -82,25 +82,6 @@
           "type": "integer",
           "minimum": -1
         },
-        "onExistingCompatible": {
-          "description": "Selects how to treat previously downloaded archive if new archive is to be downloaded with compatible settings, so contents of previous archive could be simply updated.\nskip - nothing will be downloaded\nupdate - archive is appended (default)\nbackup - new download is made from scratch, old archive is kept as a backup\ndelete - new download is made from scratch, old archive is deleted",
-          "type": "string",
-          "enum": [
-            "backup",
-            "delete",
-            "update",
-            "skip"
-          ]
-        },
-        "onExistingIncompatible": {
-          "description": "Selects how to treat previously downloaded archive if new download settings require to start from scratch.\nskip - nothing will be downloaded\nbackup - old archive is kept as a backup (default)\ndelete - old archive is deleted",
-          "type": "string",
-          "enum": [
-            "backup",
-            "delete",
-            "skip"
-          ]
-        },
         "attachments": {
           "type": "object",
           "additionalProperties": false,

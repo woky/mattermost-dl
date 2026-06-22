@@ -270,7 +270,6 @@ afterPost = "abcdef" # Post Id
 name = "username"
 # Downloads run newest->oldest, so a post cap keeps the newest N messages
 maximumPostCount = 10
-onExistingIncompatible = "delete"
 ```
 
 ### Download everything we can
@@ -297,22 +296,6 @@ maxSize = 10485760 # 10MB
 allowedMimeTypes = [
   "application/pdf"
 ]
-```
-
-### Reduce backup creation
-
-By default, lot of care exist to prevent loss of already downloaded data.
-That leads to keeping intermediate data on errors + interrupted downloads and backing up the channel in case it's redownloaded when the required options for that channel aren't compatible with appending into previous storage.
-Those backups can be distingushed by having `--backup` in their name and should be removed manually if not required.
-
-The redownload case can be configured like so:
-
-```toml
-[defaultChannelOptions]
-# If we can append into current archive, should we do it or redownload from scratch?
-onExistingCompatible = "update"
-# If we do have to redownload, don't keep old archive
-onExistingIncompatible = "delete"
 ```
 
 ## Supported environmental variables

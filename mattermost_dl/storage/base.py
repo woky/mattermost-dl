@@ -64,34 +64,12 @@ class ChannelArchive(ABC):
     '''
         Per-channel persistence handle. Lifecycle, as driven by the saver:
 
-            archive.committedExists() / isInterrupted()   # recovery gate
-            archive.discard() | archive.backup(arbiter)    # recovery mechanics
             state = archive.reconcileBuffer()              # resume?
             newest = archive.committedNewestPost()         # incremental boundary
             with archive.stagingWriter(resume) as w:       # fetch newest->oldest
                 ... w.add(rawPost) ...
             archive.commit(incremental=..., localNewestId=...)
     '''
-
-    @abstractmethod
-    def committedExists(self) -> bool:
-        '''True if a non-empty committed archive already exists.'''
-
-    @abstractmethod
-    def isInterrupted(self) -> bool:
-        '''True if a resumable (non-empty) interrupted buffer is present.'''
-
-    @abstractmethod
-    def discard(self) -> None:
-        '''Delete the committed archive (and its metadata).'''
-
-    @abstractmethod
-    def backup(self, arbiter) -> bool:
-        '''
-            Move the committed archive aside as a backup. Returns False if the
-            download should be skipped (the arbiter declined to overwrite an
-            existing backup), True otherwise.
-        '''
 
     @abstractmethod
     def committedNewestPost(self) -> Optional[Tuple[Id, Time]]:

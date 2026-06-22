@@ -15,7 +15,6 @@ from pathlib import Path
 
 from mattermost_dl import progress
 from mattermost_dl.config import ChannelOptions
-from mattermost_dl.recovery import RBackup, RDelete, RSkipDownload
 from mattermost_dl.saver import ChannelRequest
 from mattermost_dl.storage.directory_json.entities import Post
 from mattermost_dl.types import Time
@@ -260,39 +259,6 @@ class ReusePolicyTests(CycleTestBase):
         channel = makeChannel(messageCount=7)
         saver.processChannel(OUTFILE, self.request(channel))
         self.assertEqual(readStoredIds(data), ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'])
-
-    def test_existing_archive_skip_policy_leaves_it(self):
-        header, data, tmp = self._commitBaseline()
-        saver, driver = self.saverFor(self.allPosts, pageSize=60)
-        channel = makeChannel(messageCount=7)
-        options = ChannelOptions()
-        options.onExistingCompatibleArchive = RSkipDownload()
-        saver.processChannel(OUTFILE, self.request(channel, options))
-        self.assertEqual(readStoredIds(data), ['p1', 'p2', 'p3', 'p4'])
-        self.assertEqual(driver.requestLog, [], 'skip policy must not fetch anything')
-
-    def test_existing_archive_delete_policy_redownloads(self):
-        header, data, tmp = self._commitBaseline()
-        saver, _ = self.saverFor(self.allPosts, pageSize=60)
-        channel = makeChannel(messageCount=7)
-        options = ChannelOptions()
-        options.onExistingCompatibleArchive = RDelete()
-        saver.processChannel(OUTFILE, self.request(channel, options))
-        # Deleted then redownloaded from scratch -> full channel, single copy.
-        self.assertEqual(readStoredIds(data), ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'])
-        self.assertFalse(tmp.exists())
-
-    def test_existing_archive_backup_policy_preserves_old(self):
-        header, data, tmp = self._commitBaseline()
-        saver, _ = self.saverFor(self.allPosts, pageSize=60)
-        channel = makeChannel(messageCount=7)
-        options = ChannelOptions()
-        options.onExistingCompatibleArchive = RBackup()
-        saver.processChannel(OUTFILE, self.request(channel, options))
-        self.assertEqual(readStoredIds(data), ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'])
-        backupData = self.dir / (OUTFILE + '--backup.data.json')
-        self.assertTrue(backupData.exists(), 'previous archive should be backed up')
-        self.assertEqual(readStoredIds(backupData), ['p1', 'p2', 'p3', 'p4'])
 
 
 class InterruptResumeTests(CycleTestBase):

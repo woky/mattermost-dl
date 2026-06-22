@@ -2,7 +2,7 @@
     Cross-cutting value types shared across the whole program.
 
     These are deliberately storage-independent: the download pipeline (driver,
-    saver orchestration, config, recovery) passes raw Mattermost API dicts plus
+    saver orchestration, config) passes raw Mattermost API dicts plus
     these small utilities. They are NOT "business objects" -- the entity model
     and the on-disk format live privately inside a storage backend.
 '''

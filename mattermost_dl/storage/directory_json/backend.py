@@ -24,7 +24,6 @@ from typing import (Any, Callable, Collection, Dict, Generator, Iterable, List,
                     Optional, Tuple, TypeVar, cast)
 
 from ...config import ChannelOptions, ConfigFile
-from ...recovery_actions import RBackup, RDelete, RSkipDownload
 from ...types import Id, PostHints, Time
 from ..base import (ChannelArchive, DownloadServices, ResumeState, StagingWriter,
                     StorageBackend)
@@ -227,68 +226,6 @@ class DirectoryJsonChannelArchive(ChannelArchive):
         self.headerFilename = outdir / (key + '.meta.json')
         self.dataFilename = outdir / (key + '.data.json')
         self.tmpFilename = outdir / (key + '.data.json.tmp')
-
-    # ----- recovery -----------------------------------------------------------
-    def committedExists(self) -> bool:
-        return self.dataFilename.is_file()
-
-    def isInterrupted(self) -> bool:
-        return self.tmpFilename.is_file() and self.tmpFilename.stat().st_size > 0
-
-    def discard(self) -> None:
-        if self.headerFilename.is_file():
-            self.headerFilename.unlink()
-        if self.dataFilename.is_file():
-            self.dataFilename.unlink()
-
-    def _makeArchiveFilenames(self, stem: str) -> Tuple[Path, Path]:
-        outdir = self.backend.outputDirectory
-        return outdir / (stem + '.meta.json'), outdir / (stem + '.data.json')
-
-    def _unusedBackupFilenames(self, alternatives: Generator[str, None, None]) -> Tuple[Path, Path]:
-        while True:
-            fname = next(alternatives)
-            headerFname, dataFname = self._makeArchiveFilenames(fname)
-            if not headerFname.is_file() and not dataFname.is_file():
-                return headerFname, dataFname
-
-    def backup(self, arbiter) -> bool:
-        def backupAltNames() -> Generator[str, None, None]:
-            i = 1
-            while True:
-                yield f'{self.key}--backup~{i}'
-                i += 1
-
-        headerFname, dataFname = self.headerFilename, self.dataFilename
-        headerBackupFname, dataBackupFname = self._makeArchiveFilenames(self.key + '--backup')
-
-        headerExist = headerFname.is_file()
-        dataExist = dataFname.is_file()
-        if not headerExist and not dataExist:
-            return True
-
-        if headerBackupFname.is_file() or dataBackupFname.is_file():
-            opts = arbiter.onExistingChannelBackup(self._channelRaw, headerBackupFname, dataBackupFname)
-            if isinstance(opts, RSkipDownload):
-                return False
-            elif isinstance(opts, RDelete):
-                if headerBackupFname.is_file():
-                    headerBackupFname.unlink()
-                if dataBackupFname.is_file():
-                    dataBackupFname.unlink()
-            else:
-                assert opts == RBackup()
-                headerAlt, dataAlt = self._unusedBackupFilenames(backupAltNames())
-                if headerBackupFname.is_file():
-                    headerBackupFname.rename(headerAlt)
-                if dataBackupFname.is_file():
-                    dataBackupFname.rename(dataAlt)
-
-        if headerExist:
-            headerFname.rename(headerBackupFname)
-        if dataExist:
-            dataFname.rename(dataBackupFname)
-        return True
 
     # ----- download boundary --------------------------------------------------
     def committedNewestPost(self) -> Optional[Tuple[Id, Time]]:

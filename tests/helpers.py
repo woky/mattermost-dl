@@ -10,7 +10,6 @@ from pathlib import Path
 from mattermost_dl import progress
 from mattermost_dl.config import ConfigFile
 from mattermost_dl.driver import MattermostDriver
-from mattermost_dl.recovery import RecoveryArbiter
 from mattermost_dl.saver import Saver
 
 
@@ -110,7 +109,7 @@ def makeChannel(id='chan', messageCount=100):
 
 
 def makeSaver(config, driver):
-    return Saver(config, driver=driver, recoveryArbiter=RecoveryArbiter(config))
+    return Saver(config, driver=driver)
 
 
 def readStoredIds(dataFile):

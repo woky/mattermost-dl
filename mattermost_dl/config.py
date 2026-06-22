@@ -8,7 +8,6 @@ from . import jsonvalidation
 from .jsonvalidation import ValidationErrors, validate as validateJson, formatValidationErrors
 from . import progress
 from .progress import ProgressSettings
-from .recovery_actions import RBackup, RDelete, RReuse, RSkipDownload
 
 import argparse
 from collections.abc import Iterable
@@ -39,8 +38,6 @@ class ChannelOptions:
     postsAfterTime: Optional[Time] = None
     postLimit: int = -1 # 0 is allowed and fetches only channel metadata
     postSessionLimit: int = -1 # 0 is allowed and fetches only channel metadata
-    onExistingCompatibleArchive: Union[RBackup, RDelete, RReuse, RSkipDownload] = RReuse()
-    onExistingIncompatibleArchive: Union[RBackup, RDelete, RSkipDownload] = RBackup()
     downloadAttachments: bool = False
     downloadAttachmentTypes: List[str] = dataclassfield(default_factory=list)
     downloadAttachmentSizeLimit: int = 0 # 0 means no limit
@@ -63,22 +60,6 @@ class ChannelOptions:
 
         self.postLimit = info.get('maximumPostCount', self.postLimit)
         self.postSessionLimit = info.get('sessionPostLimit', self.postSessionLimit)
-
-        x = info.get('onExistingCompatible', None)
-        if x is not None:
-            self.onExistingCompatibleArchive = {
-                'backup': RBackup(),
-                'delete': RDelete(),
-                'skip': RSkipDownload(),
-                'update': RReuse(),
-            }.get(x, self.onExistingCompatibleArchive)
-        x = info.get('onExistingIncompatible', None)
-        if x is not None:
-            self.onExistingIncompatibleArchive = {
-                'backup': RBackup(),
-                'delete': RDelete(),
-                'skip': RSkipDownload(),
-            }.get(x, self.onExistingIncompatibleArchive)
 
         if 'attachments' in info:
             attachments = info['attachments']

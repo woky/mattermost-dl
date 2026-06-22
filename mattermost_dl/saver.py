@@ -12,7 +12,6 @@ from .config import ChannelOptions, ConfigFile, GroupChannelSpec, LogVerbosity, 
 from .driver import (MattermostDriver, CHANNEL_OPEN, CHANNEL_PRIVATE,
     CHANNEL_GROUP, CHANNEL_DIRECT)
 from . import progress
-from .recovery import RReuse, RecoveryArbiter, RBackup, RDelete, RSkipDownload
 from .storage import makeBackend
 
 import threading
@@ -62,16 +61,11 @@ class Saver:
         Main class responsible for orchestrating the downloading process.
         Should start from __call__ method.
     '''
-    def __init__(self, configfile: ConfigFile, driver: Optional[MattermostDriver] = None,
-            recoveryArbiter: Optional[RecoveryArbiter] = None
-            ):
+    def __init__(self, configfile: ConfigFile, driver: Optional[MattermostDriver] = None):
         if driver is None:
             driver = MattermostDriver(configfile)
-        if recoveryArbiter is None:
-            recoveryArbiter = RecoveryArbiter(configfile)
         self.configfile = configfile
         self.driver: MattermostDriver = driver
-        self.recoveryArbiter: RecoveryArbiter = recoveryArbiter
         self.user: dict  # Conveniency, fetched on call (raw user reply)
         # Set to ask in-flight channel workers to wind down (e.g. on Ctrl-C); each
         # leaves its resumable .tmp buffer behind. Only consulted when channels are
@@ -284,22 +278,6 @@ class Saver:
             return  # Early exit - nothing downloaded
 
         archive = self.backend.channelArchive(channelOutfile, channel, team, options, seedUsers)
-
-        # With no interrupted buffer but an existing committed archive, the user's
-        # reuse policy decides whether to append, back up, delete or skip. An
-        # interrupted buffer is always simply resumed (the policy already applied
-        # when that interrupted run started).
-        if not archive.isInterrupted() and archive.committedExists():
-            decision = self.recoveryArbiter.onArchiveReuse(options, reusable=True)
-            if isinstance(decision, RSkipDownload):
-                return
-            elif isinstance(decision, RDelete):
-                archive.discard()
-            elif isinstance(decision, RBackup):
-                if not archive.backup(self.recoveryArbiter):
-                    return
-            else:
-                assert isinstance(decision, RReuse)
 
         resumed = self._runDownloadCycle(archive, channel, options)
         if resumed:

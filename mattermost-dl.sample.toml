@@ -78,6 +78,3 @@ maximumPostCount = 10
 
 [[teams.privateChannels]]
 internalName = "auriga"
-# Starting from scratch
-onExistingCompatible = "delete"
-onExistingIncompatible = "delete"
