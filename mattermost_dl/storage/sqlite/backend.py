@@ -164,6 +164,12 @@ class SqliteBackend(StorageBackend):
         with self._initLock:
             if self._conn is not None:
                 with self._dbLock:
+                    # Refresh query-planner stats before closing so the b-tree indexes are
+                    # actually chosen on later opens. optimize ANALYZEs only the tables this
+                    # run touched whose stats went stale; analysis_limit caps the cost on a
+                    # large archive (stats turn approximate, which is fine for planning).
+                    self._conn.execute('PRAGMA analysis_limit=1000')
+                    self._conn.execute('PRAGMA optimize')
                     self._conn.commit()
                     self._conn.close()
                 self._conn = None

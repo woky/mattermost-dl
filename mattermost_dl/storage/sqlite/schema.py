@@ -84,9 +84,25 @@ CREATE TRIGGER posts_au AFTER UPDATE ON posts BEGIN
 END;
 '''
 
+# v2: indexes for the no-query "posts of a user, optionally in a given channel" browse -- the
+# only browse path that hits the posts b-tree indexes. The FTS-driven search path never
+# consults them: it drives from posts_fts and applies channel/user/date as residual filters.
+# Widening posts_user_idx to (user_id, create_at) lets a by-author browse read newest-first
+# straight from the index instead of sorting, and covers user_id + date ranges. The
+# (user_id, channel_id, create_at) composite extends that to "that user's posts in one
+# channel": both equalities are matched and create_at stays last, so the pair is still read
+# newest-first without a sort. No channel-leading or date-only index is added -- those would
+# serve browse modes outside this workload.
+_V2 = '''
+DROP INDEX posts_user_idx;
+CREATE INDEX posts_user_idx ON posts(user_id, create_at);
+CREATE INDEX posts_user_channel_idx ON posts(user_id, channel_id, create_at);
+'''
+
 # Ordered list of (version, DDL). Append new steps; never edit a shipped one.
 MIGRATIONS: List[Tuple[int, str]] = [
     (1, _V1),
+    (2, _V2),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]
