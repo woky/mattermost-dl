@@ -19,6 +19,10 @@ from typing import (
     Optional, Set, Sized, TextIO, Tuple, Type, TypeVar, Union
 )
 
+# Cross-cutting value types (storage-independent), re-exported so the existing
+# `from .common import *` prelude makes them available project-wide.
+from .types import *
+
 def sourceDirectory(sourceFile: str) -> Path:
     return Path(os.path.dirname(os.path.abspath(sourceFile)))
 

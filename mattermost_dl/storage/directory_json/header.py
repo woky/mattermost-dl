@@ -14,13 +14,12 @@
         - its presence means a prior download was interrupted and can be resumed
 '''
 
-from .common import *
+from ...common import *
 
-from .bo import *
-from .config import ChannelOptions
-from .driver import MattermostDriver
-from .jsonvalidation import validate as validateJson, formatValidationErrors
-from . import jsonvalidation
+from .entities import *
+from ...config import ChannelOptions
+from ...jsonvalidation import validate as validateJson, formatValidationErrors
+from ... import jsonvalidation
 
 from collections.abc import Iterable
 import json
@@ -197,7 +196,7 @@ class PostStorage(JsonMessage):
         return storage
 
 
-    def addSortedPost(self, p: Post, postOrderHints: MattermostDriver.PostHints):
+    def addSortedPost(self, p: Post, postOrderHints: PostHints):
         '''
             Records one post into the storage metadata. Posts must be fed in
             ascending (oldest->newest) order, as produced by the commit pass.

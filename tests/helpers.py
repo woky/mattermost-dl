@@ -8,7 +8,6 @@ import threading
 from pathlib import Path
 
 from mattermost_dl import progress
-from mattermost_dl.bo import Channel, ChannelType, Emoji, Id, Time, User
 from mattermost_dl.config import ConfigFile
 from mattermost_dl.driver import MattermostDriver
 from mattermost_dl.recovery import RecoveryArbiter
@@ -77,10 +76,17 @@ class FakePostsDriver(MattermostDriver):
                 'prev_post_id': prev_post_id, 'next_post_id': next_post_id}
 
     def getUserById(self, id):
-        return User(misc={}, id=Id(id), name=f'user-{id}', createTime=Time(0))
+        return {
+            'id': id, 'username': f'user-{id}', 'nickname': '', 'first_name': '',
+            'last_name': '', 'create_at': 0, 'update_at': 0, 'delete_at': 0,
+            'position': '', 'roles': 'system_user',
+        }
 
     def getEmojiById(self, id):
-        return Emoji(misc={}, id=Id(id), creatorId=Id('c'), name=f'emoji-{id}', createTime=Time(0))
+        return {
+            'id': id, 'creator_id': 'c', 'name': f'emoji-{id}',
+            'create_at': 0, 'update_at': 0, 'delete_at': 0,
+        }
 
 
 def makeConfig(outdir, pageSize=60):
@@ -94,8 +100,13 @@ def makeConfig(outdir, pageSize=60):
 
 
 def makeChannel(id='chan', messageCount=100):
-    return Channel(misc={}, id=Id(id), internalName=id, createTime=Time(0),
-                   type=ChannelType.Open, messageCount=messageCount)
+    '''A Mattermost-API-shaped open channel dict, as the driver yields it.'''
+    return {
+        'id': id, 'name': id, 'display_name': id, 'type': 'O',
+        'create_at': 0, 'update_at': 0, 'delete_at': 0,
+        'header': '', 'purpose': '', 'last_post_at': 0,
+        'total_msg_count': messageCount, 'creator_id': '',
+    }
 
 
 def makeSaver(config, driver):

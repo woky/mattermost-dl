@@ -4,7 +4,6 @@
 '''
 
 from .common import *
-from .bo import *
 from .config import ConfigFile
 
 import json
@@ -16,11 +15,23 @@ from time import sleep
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 
+# Raw Mattermost channel type codes (the API `type` field).
+CHANNEL_OPEN = 'O'
+CHANNEL_PRIVATE = 'P'
+CHANNEL_GROUP = 'G'
+CHANNEL_DIRECT = 'D'
+
 @dataclass
 class Cache:
-    users: Dict[Id, User] = dataclassfield(default_factory=dict)
-    teams: Dict[Id, Team] = dataclassfield(default_factory=dict)
-    emojis: Dict[Id, Emoji] = dataclassfield(default_factory=dict)
+    # Everything is cached as the raw API reply dicts; the download pipeline is
+    # storage-independent and never converts these into business objects.
+    users: Dict[Id, dict] = dataclassfield(default_factory=dict)
+    teams: Dict[Id, dict] = dataclassfield(default_factory=dict)
+    emojis: Dict[Id, dict] = dataclassfield(default_factory=dict)
+    # teamId -> {channelId: raw channel}; filled lazily by loadChannels.
+    channels: Dict[Id, Dict[Id, dict]] = dataclassfield(default_factory=dict)
+    # channelId -> list of raw member user dicts; filled by loadChannelMembers.
+    channelMembers: Dict[Id, List[dict]] = dataclassfield(default_factory=dict)
 
 
 class AdaptiveConcurrency:
@@ -313,37 +324,35 @@ class MattermostDriver:
 
         self.authorizationToken = r.headers['Token']
 
-    def getUserById(self, id: Id) -> User:
+    def getUserById(self, id: Id) -> dict:
         with self.cacheLock:
             if id in self.cache.users:
                 return self.cache.users[id]
 
         userInfo = self.get('users/'+id)
         assert isinstance(userInfo, dict)
-        u = User.fromMattermost(userInfo)
         with self.cacheLock:
-            self.cache.users.update({u.id: u})
-        return u
+            self.cache.users[userInfo['id']] = userInfo
+        return userInfo
 
-    def getUserByName(self, userName: str) -> User:
+    def getUserByName(self, userName: str) -> dict:
         with self.cacheLock:
             for user in self.cache.users.values():
-                if user.name == userName:
+                if user['username'] == userName:
                     return user
 
         userInfo = self.get('users/username/'+userName)
         assert isinstance(userInfo, dict)
-        u = User.fromMattermost(userInfo)
         with self.cacheLock:
-            self.cache.users.update({u.id: u})
-        return u
+            self.cache.users[userInfo['id']] = userInfo
+        return userInfo
 
-    def loadLocalUser(self) -> User:
+    def loadLocalUser(self) -> dict:
         u = self.getUserByName(self.configfile.username)
-        self.context['userId'] = u.id
+        self.context['userId'] = u['id']
         return u
 
-    def getTeams(self) -> Dict[Id, Team]:
+    def getTeams(self) -> Dict[Id, dict]:
         with self.cacheLock:
             if len(self.cache.teams) != 0:
                 return self.cache.teams
@@ -351,22 +360,21 @@ class MattermostDriver:
         assert isinstance(teamInfos, list)
         with self.cacheLock:
             for teamInfo in teamInfos:
-                t = Team.fromMattermost(teamInfo)
-                self.cache.teams.update({t.id: t})
+                self.cache.teams[teamInfo['id']] = teamInfo
             return self.cache.teams
 
-    def getTeamById(self, teamId: Id) -> Team:
+    def getTeamById(self, teamId: Id) -> dict:
         return self.getTeams()[teamId]
-    def getTeamByName(self, name: str) -> Team:
+    def getTeamByName(self, name: str) -> dict:
         teams = self.getTeams()
         for team in teams.values():
-            if team.name == name:
+            if team['display_name'] == name:
                 return team
         raise KeyError
-    def getTeamByIntenalName(self, name: str) -> Team:
+    def getTeamByIntenalName(self, name: str) -> dict:
         teams = self.getTeams()
         for team in teams.values():
-            if team.internalName == name:
+            if team['name'] == name:
                 return team
         raise KeyError
 
@@ -374,23 +382,27 @@ class MattermostDriver:
         if not teamId:
             teamId = Id(self.context['teamId'])
         channelInfos = self.get(f'users/{{userId}}/teams/{teamId}/channels')
-        t = self.cache.teams[teamId]
         assert isinstance(channelInfos, list)
-        for chInfo in channelInfos:
-            ch = Channel.fromMattermost(chInfo)
-            t.channels.update({ch.id: ch})
+        with self.cacheLock:
+            chMap = self.cache.channels.setdefault(teamId, {})
+            for chInfo in channelInfos:
+                chMap[chInfo['id']] = chInfo
 
-    def getChannelById(self, channelId: Id, teamId: Id = None) -> Channel:
+    def getChannels(self, teamId: Id) -> Dict[Id, dict]:
+        '''Raw channels of a team (must have been loaded by loadChannels).'''
+        return self.cache.channels.get(teamId, {})
+
+    def getChannelById(self, channelId: Id, teamId: Id = None) -> dict:
         if teamId is None:
             teamId = self.context['teamId']
             assert teamId is not None
-        return self.cache.teams[teamId].channels[channelId]
-    def getChannelByName(self, name: str, teamId: Id = None) -> Channel:
+        return self.cache.channels[teamId][channelId]
+    def getChannelByName(self, name: str, teamId: Id = None) -> dict:
         if teamId is None:
             teamId = self.context['teamId']
             assert teamId is not None
-        for channel in self.cache.teams[teamId].channels.values():
-            if channel.name == name:
+        for channel in self.cache.channels[teamId].values():
+            if channel['display_name'] == name:
                 return channel
         raise KeyError
 
@@ -401,14 +413,14 @@ class MattermostDriver:
         else:
             return f'{otherUserId}__{localUserId}'
     def getDirectChannelNameByUserName(self, otherUserName: str):
-        return self.getDirectChannelNameByUserId(self.getUserByName(otherUserName).id)
+        return self.getDirectChannelNameByUserId(self.getUserByName(otherUserName)['id'])
 
-    def getDirectChannelByUserName(self, otherUserName: str, teamId = None) -> Channel:
+    def getDirectChannelByUserName(self, otherUserName: str, teamId = None) -> dict:
         if not teamId:
             teamId = self.context['teamId']
         channelName = self.getDirectChannelNameByUserName(otherUserName)
-        for channel in self.cache.teams[teamId].channels.values():
-            if channel.type == ChannelType.Direct and channel.internalName == channelName:
+        for channel in self.cache.channels[teamId].values():
+            if channel['type'] == CHANNEL_DIRECT and channel['name'] == channelName:
                 return channel
         raise KeyError
 
@@ -422,19 +434,22 @@ class MattermostDriver:
         else:
             return Id(left)
 
-    def loadChannelMembers(self, channel: Channel):
-        if channel.members is not None:
-            return
+    def loadChannelMembers(self, channelId: Id) -> List[dict]:
+        '''
+            Raw member user dicts of a channel, fetched once and cached.
+        '''
+        with self.cacheLock:
+            if channelId in self.cache.channelMembers:
+                return self.cache.channelMembers[channelId]
 
-        res = []
-
+        res: List[dict] = []
         page = 0
         params = {
             'per_page': 100
         }
         while True:
             params.update({'page': page})
-            memberWindow = self.get(f'channels/{channel.id}/members', params)
+            memberWindow = self.get(f'channels/{channelId}/members', params)
             assert isinstance(memberWindow, list)
             for m in memberWindow:
                 res.append(self.getUserById(m['user_id']))
@@ -444,20 +459,14 @@ class MattermostDriver:
 
             page += 1
 
-        channel.members = res
+        with self.cacheLock:
+            self.cache.channelMembers[channelId] = res
+        return res
 
-    def getPostById(self, postId: Id) -> Post:
+    def getPostById(self, postId: Id) -> dict:
         postInfo = self.get(f'/posts/{postId}')
         assert isinstance(postInfo, dict)
-        return Post.fromMattermost(postInfo)
-
-    @dataclass
-    class PostHints:
-        processedCount: int = 0
-        # Id of post directly chronologically preceding current one. None if the post is first in channel
-        postIdBefore: Optional[Id] = None
-        # Id of post directly chronologically succeeding current one. None if the post is last in channel
-        postIdAfter: Optional[Id] = None
+        return postInfo
 
     class ProcessPostResult(Enum):
         NothingRequested = enumerator()
@@ -465,8 +474,8 @@ class MattermostDriver:
         MaxCountReached = enumerator()
         ConditionReached = enumerator()
 
-    def processPosts(self, processor: Callable[[Post, 'MattermostDriver.PostHints'], None],
-            channel: Optional[Channel] = None, *,
+    def processPosts(self, processor: Callable[[dict, PostHints], None],
+            channel: Optional[dict] = None, *,
             beforePost: Optional[Id] = None, afterPost: Optional[Id] = None,
             beforeTime: Optional[Time] = None, afterTime: Optional[Time] = None,
             bufferSize: int = 0, maxCount: int = 0, offset: int = 0,
@@ -492,11 +501,10 @@ class MattermostDriver:
         '''
         if not bufferSize:
             bufferSize = self.configfile.throttlingPageSize
-        if channel:
-            channelId = channel.id
+        if channel is not None:
+            channelId = channel['id']
         else:
             channelId = Id(self.context['channelId'])
-            channel = self.getChannelById(channelId)
 
         params: Dict[str, Any] = {
             'per_page': bufferSize
@@ -518,7 +526,7 @@ class MattermostDriver:
         # How many messages on page shall be ignored (in the download direction)
         pageOffset: int = offset % bufferSize
 
-        postHints = self.PostHints()
+        postHints = PostHints()
         while True:
             if page != 0:
                 params.update(page=page)
@@ -541,7 +549,7 @@ class MattermostDriver:
                 if beforeTime and p['create_at'] >= beforeTime.timestamp:
                     onSkippedPost()
                     continue
-                processor(Post.fromMattermost(p), postHints)
+                processor(p, postHints)
                 postHints.processedCount += 1
 
             # No messages recieved?
@@ -563,14 +571,14 @@ class MattermostDriver:
             if pageOffset != 0:
                 pageOffset = 0
 
-    def getPosts(self, channel: Channel = None, *args, **kwargs) -> List[Post]:
+    def getPosts(self, channel: dict = None, *args, **kwargs) -> List[dict]:
         result = []
-        def process(p: Post, hints: 'MattermostDriver.PostHints'):
+        def process(p: dict, hints: PostHints):
             result.append(p)
         self.processPosts(channel=channel, processor=process, *args, **kwargs)
         return result
 
-    def processEmojiList(self, processor: Callable[[Emoji], None], bufferSize: int = 0, maxCount: int = 0):
+    def processEmojiList(self, processor: Callable[[dict], None], bufferSize: int = 0, maxCount: int = 0):
         if not bufferSize:
             bufferSize = self.configfile.throttlingPageSize
         params = {
@@ -586,23 +594,22 @@ class MattermostDriver:
             emojiWindow = self.get('emoji', params)
             assert isinstance(emojiWindow, list)
             for emojiInfo in emojiWindow:
-                e = Emoji.fromMattermost(emojiInfo)
                 with self.cacheLock:
-                    self.cache.emojis.update({e.id: e})
-                processor(e)
+                    self.cache.emojis[emojiInfo['id']] = emojiInfo
+                processor(emojiInfo)
             recieved += len(emojiWindow)
             if len(emojiWindow) < bufferSize or (maxCount and recieved >= maxCount):
                 break
             page += 1
 
-    def getEmojiList(self, *args, **kwargs) -> List[Emoji]:
+    def getEmojiList(self, *args, **kwargs) -> List[dict]:
         result = []
-        def process(p: Emoji):
+        def process(p: dict):
             result.append(p)
         self.processEmojiList(processor=process, *args, **kwargs)
         return result
 
-    def getEmojiById(self, emojiId: Id) -> Emoji:
+    def getEmojiById(self, emojiId: Id) -> dict:
         if len(self.cache.emojis) == 0:
             self.getEmojiList()
         with self.cacheLock:
@@ -611,24 +618,24 @@ class MattermostDriver:
             else:
                 raise KeyError
 
-    def getEmojiByName(self, emojiName: str) -> Emoji:
+    def getEmojiByName(self, emojiName: str) -> dict:
         if len(self.cache.emojis) == 0:
             self.getEmojiList()
         with self.cacheLock:
             for emoji in self.cache.emojis.values():
-                if emoji.name == emojiName:
+                if emoji['name'] == emojiName:
                     return emoji
         raise KeyError
 
-    def getEmojiUrl(self, emoji: Emoji) -> str:
-        return f'emoji/{emoji.id}/image'
+    def getEmojiUrl(self, emojiId: Id) -> str:
+        return f'emoji/{emojiId}/image'
 
-    def getFileUrl(self, file: FileAttachment, publicUrl = False) -> str:
+    def getFileUrl(self, fileId: Id, publicUrl = False) -> str:
         # Note: public access links may be unimplemented by server
         if publicUrl:
-            return f'{self.configfile.hostname}{self.API_PART}files/{file.id}/link'
+            return f'{self.configfile.hostname}{self.API_PART}files/{fileId}/link'
         else:
-            return f'files/{file.id}'
+            return f'files/{fileId}'
 
-    def getAvatarUrl(self, user: User) -> str:
-        return f'users/{user.id}/image'
+    def getAvatarUrl(self, userId: Id) -> str:
+        return f'users/{userId}/image'

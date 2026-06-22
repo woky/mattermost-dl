@@ -1,6 +1,10 @@
 '''
-    Defines "business objects",
-    OOP model representations of Mattermost entities
+    Entity model private to the directory/JSON storage backend.
+
+    These OOP "business objects" translate raw Mattermost API replies
+    (`fromMattermost`) into this backend's bespoke camelCase on-disk format
+    (`toStore`) and back (`fromStore`). They are deliberately NOT visible to the
+    storage-independent download pipeline, which works on raw API dicts.
 '''
 
 __all__ = [
@@ -20,80 +24,17 @@ __all__ = [
     'Team',
 ]
 
-from .common import *
-from .jsonvalidation import validate as validateJson, formatValidationErrors
-from . import jsonvalidation
+from ...common import *
+from ...jsonvalidation import validate as validateJson, formatValidationErrors
+from ... import jsonvalidation
 
 from collections.abc import Iterable
-from datetime import datetime
-from functools import total_ordering
 import json
 import jsonschema
 
-class StoreError(Exception):
-    '''Failed to load from the storage of downloaded content.'''
-    pass
-
-class EntityLocator:
-    def __init__(self, info: dict):
-        ok = False
-        for key in info:
-            if key in ('id', 'name', 'internalName'):
-                if ok:
-                    raise ValueError('EntityLocator with multiple (possibly conflicting) identificators.')
-                ok = True
-        else:
-            if not ok:
-                raise ValueError('EntityLocator has no identificator.')
-        if 'id' in info:
-            self.id: Id = info['id']
-        if 'name' in info:
-            self.name: str = info['name']
-        if 'internalName' in info:
-            self.internalName: str = info['internalName']
-    def __repr__(self) -> str:
-        return f'EntityLocator({self.__dict__})'
-
-@total_ordering
-class Time:
-    def __init__(self, time: Union[int, str]):
-        self._time: int
-        # time is unix timestamp in miliseconds
-        if isinstance(time, int):
-            self._time = time
-        else:
-            assert isinstance(time, str)
-            self._time = int(datetime.fromisoformat(time).timestamp() * 1000)
-
-    # Returns unix timestamp in miliseconds
-    @property
-    def timestamp(self) -> int:
-        return self._time
-    def __eq__(self, other: 'Time'):
-        return self._time == other._time
-    # Defining __eq__ makes instances unhashable; Python 3.11+ then rejects
-    # Time() used as a dataclass field default (see store.py). Hash by value.
-    def __hash__(self):
-        return hash(self._time)
-    def __lt__(self, other: 'Time'):
-        return self._time < other._time
-    # Needed to silence linter
-    def __gt__(self, other: 'Time'):
-        return self._time > other._time
-
-    def __str__(self):
-        fmt = datetime.fromtimestamp(self._time/1000).isoformat()
-        fractionStart = fmt.rfind('.')
-        if fractionStart != -1:
-            fmt = fmt[:fractionStart]
-        return fmt
-    def __repr__(self):
-        return f"'{datetime.fromtimestamp(self._time/1000).isoformat()}'"
-
-    def toStore(self) -> int:
-        return self.timestamp
-
-Id = NewType('Id', str)
+# StoreError, EntityLocator, Time and Id are cross-cutting value types that live
+# in `.types` (re-exported through `.common`); they are intentionally not part of
+# this entity model.
 
 @dataclass
 class JsonMessage:

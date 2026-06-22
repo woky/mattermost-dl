@@ -4,7 +4,6 @@
 '''
 
 from .common import *
-from .bo import EntityLocator, Id, Time
 from . import jsonvalidation
 from .jsonvalidation import ValidationErrors, validate as validateJson, formatValidationErrors
 from . import progress
@@ -197,7 +196,7 @@ class ConfigFile:
     publicChannelDefaults: ChannelOptions = dataclassfield(default_factory=ChannelOptions)
 
     outputDirectory: Path = Path()
-    verboseHumanFriendlyPosts: bool = False
+    outputFormat: str = 'directory-json'
     downloadAllEmojis: bool = False
 
     verbosity: LogVerbosity = LogVerbosity.Normal
@@ -295,8 +294,8 @@ class ConfigFile:
             output = config['output']
             if 'directory' in output:
                 self.outputDirectory = Path(output['directory'])
-            if 'humanFriendlyPosts' in output:
-                self.verboseHumanFriendlyPosts = output['humanFriendlyPosts']
+            if 'format' in output:
+                self.outputFormat = output['format']
 
         if 'report' in config:
             reportingOptions = config['report']

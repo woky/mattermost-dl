@@ -9,7 +9,7 @@
 import json
 import unittest
 
-from mattermost_dl.bo import Post
+from mattermost_dl.storage.directory_json.entities import Post
 
 from .helpers import mmPost
 
@@ -20,8 +20,9 @@ DROPPED_FIELDS = ('channel_id', 'reply_count', 'has_reactions', 'file_ids',
 
 
 def _toStoreFallback(obj):
-    # Matches Saver.jsonDumpToFile: nested toStore-able objects (attachments, emojis,
-    # reactions) are serialized lazily by json.dump, not by Post.toStore itself.
+    # Matches the directory_json backend's serializer: nested toStore-able objects
+    # (attachments, emojis, reactions) are serialized lazily by json.dump, not by
+    # Post.toStore itself.
     if hasattr(obj, 'toStore'):
         return obj.toStore()
     return str(obj)

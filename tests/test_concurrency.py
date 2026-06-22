@@ -20,7 +20,6 @@ from mattermost_dl import progress
 from mattermost_dl.config import ChannelOptions, ConfigFile
 from mattermost_dl.driver import AdaptiveConcurrency, MattermostDriver
 from mattermost_dl.saver import ChannelRequest
-from mattermost_dl.store import ChannelHeader
 
 from .helpers import (FakePostsDriver, makeChannel, makeConfig, makeSaver,
                       mmPost, readStoredIds)
@@ -304,7 +303,7 @@ class FakeFileDriver:
 
 class ParallelFileDownloadTests(unittest.TestCase):
     def processFiles(self, saver, entities, stored, driverCls=FakeFileDriver):
-        saver.processFiles(
+        saver.backend.processFiles(
             entities, 'files', 'things',
             getFilenameFromEntity=lambda e: e,
             shouldDownload=lambda e: True,
@@ -356,7 +355,7 @@ class ParallelFileDownloadTests(unittest.TestCase):
             config.throttlingMaxConcurrency = 4
             saver = makeSaver(config, FakeFileDriver())
             stored = {}
-            saver.processFiles(
+            saver.backend.processFiles(
                 [], 'files', 'things',
                 getFilenameFromEntity=lambda e: e,
                 shouldDownload=lambda e: True,
@@ -374,8 +373,7 @@ class ParallelChannelTests(unittest.TestCase):
 
         def downloadChannel(stem):
             channel = makeChannel(messageCount=7)
-            saver.processChannel(stem, ChannelHeader(channel=channel),
-                                 ChannelRequest(config=ChannelOptions(), metadata=channel))
+            saver.processChannel(stem, ChannelRequest(config=ChannelOptions(), metadata=channel))
 
         saver._processChannels([lambda s=s: downloadChannel(s) for s in stems])
 
@@ -417,14 +415,14 @@ class CooperativeStopTests(unittest.TestCase):
             saver = makeSaver(config, driver)
             holder['saver'] = saver
 
-            header, data = saver.makeArchiveFilenames(OUT)
-            tmp = saver.makeBufferFilename(OUT)
+            data = Path(d) / (OUT + '.data.json')
+            tmp = Path(d) / (OUT + '.data.json.tmp')
             channel = makeChannel(messageCount=7)
             request = ChannelRequest(config=ChannelOptions(), metadata=channel)
 
             # The worker wrapper swallows the cooperative KeyboardInterrupt.
             saver._runChannelTask(
-                lambda: saver.processChannel(OUT, ChannelHeader(channel=channel), request))
+                lambda: saver.processChannel(OUT, request))
 
             self.assertTrue(saver.stopEvent.is_set())
             self.assertFalse(data.exists(), 'nothing is committed on a cooperative stop')
@@ -436,7 +434,7 @@ class CooperativeStopTests(unittest.TestCase):
             config2 = makeConfig(d, pageSize=2)
             driver2 = FakePostsDriver(config2, allPosts)
             saver2 = makeSaver(config2, driver2)
-            saver2.processChannel(OUT, ChannelHeader(channel=channel), request)
+            saver2.processChannel(OUT, request)
 
             self.assertEqual(readStoredIds(data),
                              ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'])
@@ -463,8 +461,7 @@ class ParallelProgressDisplayTests(unittest.TestCase):
 
             def downloadChannel(name):
                 channel = makeChannel(id=name, messageCount=7)
-                saver.processChannel(f'o.t--{name}', ChannelHeader(channel=channel),
-                                     ChannelRequest(config=ChannelOptions(), metadata=channel))
+                saver.processChannel(f'o.t--{name}', ChannelRequest(config=ChannelOptions(), metadata=channel))
 
             with saver.progress, saver.progress.captureLogging():
                 saver._processChannels([lambda n=n: downloadChannel(n) for n in names])

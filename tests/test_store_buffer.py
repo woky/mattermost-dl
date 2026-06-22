@@ -9,10 +9,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mattermost_dl.bo import Time
-from mattermost_dl.store import (_iterLinesBackward, countStoredPosts,
-                                 iterPostsBackward, readLastStoredPost,
-                                 trimDataFileNewerThan)
+from mattermost_dl.types import Time
+from mattermost_dl.storage.directory_json.header import (
+    _iterLinesBackward, countStoredPosts, iterPostsBackward,
+    readLastStoredPost, trimDataFileNewerThan)
 
 
 def postLine(id, createTime, **extra):

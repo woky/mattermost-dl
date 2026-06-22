@@ -390,13 +390,12 @@
         "directory": {
           "type": "string"
         },
-        "standalonePosts": {
-          "description": "Whether posts contain redundant information that makes them readable without looking up ids.",
-          "type": "boolean"
-        },
-        "humanFriendlyPosts": {
-          "description": "Drops unnecessary ids from posts (replacing userIds with userNames).",
-          "type": "boolean"
+        "format": {
+          "description": "Storage backend / output format. Currently only the default directory of JSON files is supported.",
+          "type": "string",
+          "enum": [
+            "directory-json"
+          ]
         }
       }
     },

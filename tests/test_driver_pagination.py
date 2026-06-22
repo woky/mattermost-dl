@@ -7,7 +7,7 @@
 import tempfile
 import unittest
 
-from mattermost_dl.bo import Time
+from mattermost_dl.types import Time
 from mattermost_dl.config import ConfigFile
 from mattermost_dl.driver import MattermostDriver
 
@@ -29,7 +29,7 @@ class ProcessPostsTests(unittest.TestCase):
 
     def collect(self, **kwargs):
         out = []
-        result = self.driver.processPosts(processor=lambda p, h: out.append(p.id),
+        result = self.driver.processPosts(processor=lambda p, h: out.append(p["id"]),
                                           channel=self.channel, **kwargs)
         return out, result
 
@@ -83,7 +83,7 @@ class ProcessPostsTests(unittest.TestCase):
     def test_empty_channel(self):
         driver = FakePostsDriver(self.config, [])
         out = []
-        result = driver.processPosts(processor=lambda p, h: out.append(p.id),
+        result = driver.processPosts(processor=lambda p, h: out.append(p["id"]),
                                      channel=makeChannel(messageCount=0))
         self.assertEqual(out, [])
         self.assertEqual(result, MattermostDriver.ProcessPostResult.NoMorePosts)
@@ -123,7 +123,7 @@ class IncrementalAfterPostRegressionTests(unittest.TestCase):
         # Against an after-wins server this looped forever emitting p7,p6,p5 repeatedly.
         driver = AfterWinsPostsDriver(self.config, self.posts)
         out = []
-        result = driver.processPosts(processor=lambda p, h: out.append(p.id),
+        result = driver.processPosts(processor=lambda p, h: out.append(p["id"]),
                                      channel=makeChannel(messageCount=7), afterPost='p4')
         self.assertEqual(out, ['p7', 'p6', 'p5'])           # only the genuinely new posts
         self.assertEqual(len(out), len(set(out)), 'no duplicates')
@@ -134,7 +134,7 @@ class IncrementalAfterPostRegressionTests(unittest.TestCase):
         # exact combination that triggered the loop.
         driver = AfterWinsPostsDriver(self.config, self.posts)
         out = []
-        driver.processPosts(processor=lambda p, h: out.append(p.id),
+        driver.processPosts(processor=lambda p, h: out.append(p["id"]),
                             channel=makeChannel(messageCount=7),
                             beforePost='p6', afterPost='p2')
         self.assertEqual(out, ['p5', 'p4', 'p3'])  # between p6 (excl) and p2 (stop)

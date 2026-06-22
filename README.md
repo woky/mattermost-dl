@@ -331,13 +331,25 @@ Sample implementation for Bourne shell ([mattermost-dl-job.sh](scripts/mattermos
 
 ## Storage format
 
+The downloader writes through a pluggable storage backend, selected by the
+`output.format` setting. The only backend currently available is the default
+directory of JSON files (`output.format = "directory-json"`), described below;
+the download pipeline itself is storage-independent and feeds the backend raw
+Mattermost API replies.
+
+```toml
+[output]
+directory = "./dump"
+format = "directory-json" # default
+```
+
 Downloaded archives are stored as pair of files containing JSON data, pair for each channel.
 
 The `*.data.json` file contains newline-delimited Post data - that is, each line is a single post, along with additional post's metadata such as file attachments.
 
 The matching `*.meta.json` contains single object describing Channel, it's encompassing Team, participating Users (along with their metadata) and information about downloaded posts. It's important that both files are kept in sync, as knowledge of post's storage state allows efficient incremental download resulting in append-only optimization in typical case.
 
-Precise format is formally described in detail via following schemas - [of meta file](mattermost_dl/header.schema.json) and [of individual posts](mattermost_dl/post.schema.json).
+Precise format is formally described in detail via following schemas - [of meta file](mattermost_dl/storage/directory_json/header.schema.json) and [of individual posts](mattermost_dl/storage/directory_json/post.schema.json).
 
 The format was chosen carefully to be
 
